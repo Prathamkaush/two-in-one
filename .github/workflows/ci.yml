@@ -1,0 +1,36 @@
+name: checks
+on: [push, pull_request]
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: automation
+          POSTGRES_PASSWORD: test-password
+          POSTGRES_DB: automation
+        ports: ["55432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U automation -d automation"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports: ["56379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+    env:
+      DATABASE_URL: postgresql://automation:test-password@localhost:55432/automation?schema=public
+      REDIS_HOST: localhost
+      REDIS_PORT: 56379
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run prisma:generate
+      - run: npm run verify
+      - run: npm run test:integration

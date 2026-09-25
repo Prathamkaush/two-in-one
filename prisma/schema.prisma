@@ -1,0 +1,422 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Agent {
+  CLIENT
+  RESEARCH
+  SYSTEM
+}
+
+enum LeadStatus {
+  DISCOVERED
+  ANALYZED
+  QUALIFIED
+  PRESENTED
+  CONTACTED
+  REPLIED
+  INTERESTED
+  NEGOTIATING
+  WON
+  LOST
+  REJECTED
+}
+
+enum WebsiteStatus {
+  UNKNOWN
+  NO_WEBSITE
+  REACHABLE
+  UNREACHABLE
+}
+
+enum CycleStatus {
+  PENDING
+  ACTIVE
+  ANALYZING
+  COMPLETED
+  FAILED
+}
+
+enum ProcessingStatus {
+  PENDING
+  PROCESSED
+  IRRELEVANT
+  DUPLICATE
+  FAILED
+}
+
+enum RunStatus {
+  RUNNING
+  COMPLETED
+  FAILED
+}
+
+enum UsageStatus {
+  RESERVED
+  SETTLED
+  UNCERTAIN
+}
+
+model BusinessLead {
+  id              String            @id @default(cuid())
+  identityKey     String            @unique
+  businessName    String
+  category        String?
+  location        String?
+  websiteUrl      String?
+  instagramUrl    String?
+  socialUrls      Json              @default("[]")
+  publicContact   Json              @default("{}")
+  websiteStatus   WebsiteStatus     @default(UNKNOWN)
+  score           Float?
+  selectionReason String?
+  status          LeadStatus        @default(DISCOVERED)
+  notes           String?
+  presentedAt     DateTime?
+  discoveredAt    DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+  sources         BusinessSource[]
+  websiteAnalyses WebsiteAnalysis[]
+  analyses        LeadAnalysis[]
+  drafts          OutreachDraft[]
+
+  @@index([status, score])
+  @@index([discoveredAt])
+}
+
+model AgentConfiguration {
+  agent         Agent    @id
+  configuration Json
+  updatedAt     DateTime @updatedAt
+}
+
+model ClientBatch {
+  id         String   @id @default(cuid())
+  date       String   @unique
+  candidates Json
+  selected   Json     @default("[]")
+  status     String   @default("DISCOVERED")
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+}
+
+model BusinessSource {
+  id          String       @id @default(cuid())
+  leadId      String
+  lead        BusinessLead @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  provider    String
+  sourceUrl   String
+  evidence    Json
+  collectedAt DateTime     @default(now())
+
+  @@unique([leadId, sourceUrl])
+}
+
+model WebsiteAnalysis {
+  id                String        @id @default(cuid())
+  leadId            String
+  lead              BusinessLead  @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  url               String
+  status            WebsiteStatus
+  https             Boolean?
+  responseTimeMs    Int?
+  httpStatus        Int?
+  mobileViewport    Boolean?
+  contactEvidence   Json?
+  freshnessEvidence Json?
+  pageSpeed         Json?
+  limitations       String[]
+  createdAt         DateTime      @default(now())
+
+  @@index([leadId, createdAt])
+}
+
+model LeadAnalysis {
+  id              String       @id @default(cuid())
+  leadId          String
+  batchId         String?
+  lead            BusinessLead @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  score           Float
+  factors         Json
+  weightsSnapshot Json
+  onlinePresence  Json
+  reason          String
+  createdAt       DateTime     @default(now())
+
+  @@unique([leadId, batchId])
+  @@index([leadId, createdAt])
+}
+
+model ScoringConfiguration {
+  id           String   @id @default(cuid())
+  name         String   @unique
+  weights      Json
+  minimumScore Float    @default(60)
+  updatedAt    DateTime @updatedAt
+}
+
+model OutreachDraft {
+  id               String       @id @default(cuid())
+  leadId           String
+  lead             BusinessLead @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  content          String
+  verifiedEvidence Json
+  model            String
+  createdAt        DateTime     @default(now())
+
+  @@index([leadId, createdAt])
+}
+
+model ResearchCycle {
+  id                  String                 @id @default(cuid())
+  startDate           DateTime
+  endDate             DateTime
+  timezone            String
+  status              CycleStatus            @default(PENDING)
+  currentDay          Int                    @default(0)
+  totalItemsCollected Int                    @default(0)
+  totalItemsProcessed Int                    @default(0)
+  totalCost           Decimal                @default(0) @db.Decimal(14, 8)
+  createdAt           DateTime               @default(now())
+  completedAt         DateTime?
+  items               ResearchItem[]
+  clusters            ResearchCluster[]
+  candidates          OpportunityCandidate[]
+  opportunities       FinalOpportunity[]
+  report              MonthlyReport?
+
+  @@index([status, endDate])
+}
+
+model ResearchSource {
+  id            String         @id @default(cuid())
+  name          String         @unique
+  adapter       String
+  enabled       Boolean        @default(false)
+  configuration Json           @default("{}")
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+  items         ResearchItem[]
+}
+
+model ResearchItem {
+  id            String           @id @default(cuid())
+  cycleId       String
+  cycle         ResearchCycle    @relation(fields: [cycleId], references: [id])
+  sourceId      String
+  source        ResearchSource   @relation(fields: [sourceId], references: [id])
+  sourceUrl     String
+  canonicalUrl  String
+  contentHash   String
+  title         String
+  content       String
+  summary       String?
+  topic         String?
+  collectedAt   DateTime         @default(now())
+  publishedAt   DateTime?
+  metadata      Json             @default("{}")
+  status        ProcessingStatus @default(PENDING)
+  duplicateOfId String?
+  duplicateOf   ResearchItem?    @relation("Duplicates", fields: [duplicateOfId], references: [id])
+  duplicates    ResearchItem[]   @relation("Duplicates")
+  confidence    Float?
+  signals       ResearchSignal[]
+
+  @@unique([cycleId, canonicalUrl])
+  @@index([cycleId, contentHash])
+  @@index([cycleId, status])
+  @@index([sourceId, collectedAt])
+}
+
+model ResearchSignal {
+  id            String           @id @default(cuid())
+  itemId        String
+  item          ResearchItem     @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  clusterId     String?
+  cluster       ResearchCluster? @relation(fields: [clusterId], references: [id])
+  problem       String
+  category      String
+  evidenceQuote String
+  confidence    Float
+  dimensions    Json             @default("{}")
+  createdAt     DateTime         @default(now())
+
+  @@index([clusterId])
+  @@index([itemId])
+}
+
+model ResearchCluster {
+  id              String                 @id @default(cuid())
+  cycleId         String
+  cycle           ResearchCycle          @relation(fields: [cycleId], references: [id])
+  key             String
+  label           String
+  summary         String?
+  evidenceSummary Json?
+  signals         ResearchSignal[]
+  candidates      OpportunityCandidate[]
+  createdAt       DateTime               @default(now())
+
+  @@unique([cycleId, key])
+}
+
+model OpportunityCandidate {
+  id                 String          @id @default(cuid())
+  cycleId            String
+  cycle              ResearchCycle   @relation(fields: [cycleId], references: [id])
+  clusterId          String
+  cluster            ResearchCluster @relation(fields: [clusterId], references: [id])
+  name               String
+  analysis           Json
+  dimensions         Json
+  evidenceReferences Json
+  createdAt          DateTime        @default(now())
+
+  @@unique([cycleId, clusterId])
+}
+
+model FinalOpportunity {
+  id                    String        @id @default(cuid())
+  cycleId               String
+  cycle                 ResearchCycle @relation(fields: [cycleId], references: [id])
+  reportId              String
+  report                MonthlyReport @relation(fields: [reportId], references: [id])
+  rank                  Int
+  name                  String
+  problem               String
+  targetCustomer        String
+  evidence              Json
+  importance            String
+  demandSignals         Json
+  competitors           Json
+  observedGap           String
+  proposedSolution      String
+  mvp                   String
+  businessModel         String
+  monetization          Json
+  technicalComplexity   String
+  mvpComplexity         String
+  risks                 Json
+  distribution          Json
+  researchRationale     String
+  sourceReferences      Json
+  confidence            Float
+  dimensions            Json
+  validationExperiments Json
+  createdAt             DateTime      @default(now())
+
+  @@unique([reportId, rank])
+  @@index([cycleId])
+}
+
+model MonthlyReport {
+  id                  String             @id @default(cuid())
+  cycleId             String             @unique
+  cycle               ResearchCycle      @relation(fields: [cycleId], references: [id])
+  content             Json
+  insufficiencyReason String?
+  opportunities       FinalOpportunity[]
+  createdAt           DateTime           @default(now())
+}
+
+model AutomationRun {
+  id             String         @id @default(cuid())
+  agent          Agent
+  jobType        String
+  idempotencyKey String         @unique
+  status         RunStatus      @default(RUNNING)
+  startedAt      DateTime       @default(now())
+  finishedAt     DateTime?
+  durationMs     Int?
+  itemsProcessed Int            @default(0)
+  itemsSucceeded Int            @default(0)
+  itemsFailed    Int            @default(0)
+  apiUsage       Json           @default("{}")
+  aiCost         Decimal        @default(0) @db.Decimal(14, 8)
+  errorDetails   String?
+  jobs           JobExecution[]
+
+  @@index([agent, startedAt])
+}
+
+model JobExecution {
+  id           String         @id @default(cuid())
+  runId        String?
+  run          AutomationRun? @relation(fields: [runId], references: [id])
+  queue        String
+  jobId        String
+  attempt      Int
+  status       RunStatus      @default(RUNNING)
+  startedAt    DateTime       @default(now())
+  finishedAt   DateTime?
+  errorDetails String?
+
+  @@unique([queue, jobId, attempt])
+}
+
+model AIUsage {
+  id            String      @id @default(cuid())
+  requestKey    String      @unique
+  agent         Agent
+  job           String
+  model         String
+  status        UsageStatus @default(RESERVED)
+  inputTokens   Int         @default(0)
+  outputTokens  Int         @default(0)
+  estimatedCost Decimal     @db.Decimal(14, 8)
+  priceSnapshot Json
+  result        Json?
+  createdAt     DateTime    @default(now())
+  settledAt     DateTime?
+
+  @@index([createdAt, status])
+  @@index([agent, createdAt])
+}
+
+model BudgetAlert {
+  id        String   @id @default(cuid())
+  period    String
+  threshold Int
+  createdAt DateTime @default(now())
+
+  @@unique([period, threshold])
+}
+
+model DailyReport {
+  id        String   @id @default(cuid())
+  agent     Agent
+  date      String
+  cycleId   String?
+  content   Json
+  createdAt DateTime @default(now())
+
+  @@unique([agent, date])
+}
+
+model SystemError {
+  id        String   @id @default(cuid())
+  agent     Agent
+  queue     String?
+  jobId     String?
+  message   String
+  critical  Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  @@index([agent, createdAt])
+}
+
+model Notification {
+  agent     Agent    @default(SYSTEM)
+  id        String    @id @default(cuid())
+  key       String    @unique
+  text      String
+  sentAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([sentAt, createdAt])
+}
