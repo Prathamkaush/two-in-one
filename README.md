@@ -4,7 +4,7 @@ One NestJS application, PostgreSQL/Prisma, Redis/BullMQ, and shared OpenAI/Teleg
 
 ## Current status and server deployment
 
-The Tavily implementation is complete for this MVP. No additional implementation phase is required before deployment and live verification. Automated validation passed 96 unit tests, 11 PostgreSQL/Redis integration tests, TypeScript, lint, and build. External API calls were mocked: these results do not establish real Tavily coverage or Telegram delivery on the server.
+The Tavily implementation is complete for this MVP. No additional implementation phase is required before deployment and live verification. Automated validation passed 99 unit tests, 11 PostgreSQL/Redis integration tests, TypeScript, lint, and build. External API calls were mocked: these results do not establish real Tavily coverage or Telegram delivery on the server.
 
 Run deployment commands in the VPS terminal, not in Telegram:
 

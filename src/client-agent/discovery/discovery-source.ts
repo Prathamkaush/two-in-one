@@ -9,6 +9,9 @@ export interface DiscoveryResult {
   errors: number;
   duplicates: number;
   uncertainWebsites: number;
+  extractedCandidates: number;
+  rejections: Record<string, number>;
+  missingRecentActivity: number;
 }
 export interface BusinessDiscoverySource {
   readonly name: string;

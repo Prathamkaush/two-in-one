@@ -37,12 +37,41 @@ export function clientQueries(date: string, regions: string[], categories: strin
     return { ...pair, query: `${pair.category} ${pair.location} business Instagram contact`.slice(0, 500) };
   });
 }
+function sourceKey(url: string) {
+  const parsed = publicUrl(url);
+  // Instagram's locale/tracking parameters do not identify a different profile.
+  if (['instagram.com', 'www.instagram.com'].includes(parsed.hostname) && isSocialProfile(url) &&
+      parsed.pathname.split('/').filter(Boolean).length === 1) return normalizedProfile(url);
+  parsed.hash = '';
+  return parsed.toString();
+}
+function sameSource(left: string, right: string) {
+  try { return sourceKey(left) === sourceKey(right); } catch { return false; }
+}
+function quoteText(text: string) {
+  const trimmed = text.trim();
+  return /^(?:"[\s\S]*"|“[\s\S]*”|'[\s\S]*')$/.test(trimmed) ? trimmed.slice(1, -1).trim() : trimmed;
+}
 function grounded(value: z.infer<typeof quote>, evidence: SearchResult[]) {
-  return value.text.length >= 10 && value.text.length <= 500 && evidence.some((r) => r.url === value.sourceUrl && r.content.includes(value.text));
+  const text = quoteText(value.text);
+  return text.length >= 10 && text.length <= 500 && evidence.some((r) => sameSource(r.url, value.sourceUrl) &&
+    (r.content.includes(text) || r.title.includes(text)));
+}
+export function marketLocation(value: string) {
+  const label = value.trim().toLowerCase().replace(/,\s*india$/, '').trim();
+  return label === 'new delhi' ? 'delhi' : label;
+}
+const nameKey = (value: string) => value.toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
+function identitySupported(business: z.infer<typeof discoverySchema>['businesses'][number], evidence: SearchResult[], location: string) {
+  const name = nameKey(business.businessName);
+  return name.length >= 2 && evidence.some((r) => sameSource(r.url, business.identity.sourceUrl) &&
+    nameKey(`${r.title} ${r.content}`).includes(name) &&
+    // Require location evidence on the identity source; NCR alone does not establish Delhi city.
+    new RegExp(`\\b${location.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b(?![ -]*NCR)`, 'i').test(`${r.title} ${r.content}`));
 }
 function observedUrl(url: string, evidence: SearchResult[]) {
   try { publicUrl(url); } catch { return false; }
-  return evidence.some((r) => r.url === url || (r.content.match(/https:\/\/[^\s<>"')]+/g) ?? []).some((found) => found.replace(/[.,;]$/, '') === url));
+  return evidence.some((r) => sameSource(r.url, url) || (r.content.match(/https:\/\/[^\s<>"')]+/g) ?? []).some((found) => sameSource(found.replace(/[.,;]$/, ''), url)));
 }
 export function confirmedNoWebsite(value: z.infer<typeof quote> | null, profile: string, evidence: SearchResult[]) {
   if (!value || !grounded(value, evidence)) return false;
@@ -64,7 +93,9 @@ export class TavilyBusinessSource implements BusinessDiscoverySource {
   constructor(private readonly tavily: TavilyService, private readonly ai: AIService,
     private readonly settings: Settings, private readonly db: PrismaService) {}
   async discover(input: { date: string; regions: string[]; categories: string[] }): Promise<DiscoveryResult> {
-    const output: DiscoveryResult = { businesses: [], queries: [], errors: 0, duplicates: 0, uncertainWebsites: 0 };
+    const output: DiscoveryResult = { businesses: [], queries: [], errors: 0, duplicates: 0, uncertainWebsites: 0,
+      extractedCandidates: 0, rejections: {}, missingRecentActivity: 0 };
+    const reject = (reason: string) => { output.rejections[reason] = (output.rejections[reason] ?? 0) + 1; };
     const seen = new Set<string>(); let examined = 0;
     for (const plan of clientQueries(input.date, input.regions, input.categories, this.settings.get('CLIENT_DISCOVERY_QUERIES'))) {
       if (examined >= this.settings.get('CLIENT_DISCOVERY_CANDIDATES')) break;
@@ -79,11 +110,13 @@ export class TavilyBusinessSource implements BusinessDiscoverySource {
           { location: plan.location, category: plan.category, results: evidence }, discoverySchema);
         for (const business of extracted.businesses.slice(0, 3)) {
           if (examined++ >= this.settings.get('CLIENT_DISCOVERY_CANDIDATES')) break;
-          if (business.location !== plan.location || business.category !== plan.category || !business.businessName.trim() ||
-              !isSocialProfile(business.profileUrl) || !observedUrl(business.profileUrl, evidence) ||
-              ![business.identity, business.offering, business.activity].every((q) => grounded(q, evidence)) ||
-              !business.identity.text.toLowerCase().includes(business.businessName.toLowerCase()) ||
-              !business.identity.text.toLowerCase().includes(plan.location.toLowerCase())) continue;
+          output.extractedCandidates++;
+          if (marketLocation(business.location) !== marketLocation(plan.location)) { reject('location_mismatch_or_ambiguous'); continue; }
+          if (business.category.trim().toLowerCase() !== plan.category.toLowerCase()) { reject('category_mismatch'); continue; }
+          if (!isSocialProfile(business.profileUrl)) { reject('not_a_social_profile'); continue; }
+          if (!observedUrl(business.profileUrl, evidence)) { reject('profile_not_observed'); continue; }
+          if (![business.identity, business.offering].every((q) => grounded(q, evidence))) { reject('unsupported_identity_or_offering_quote'); continue; }
+          if (!identitySupported(business, evidence, plan.location)) { reject('identity_or_location_not_supported'); continue; }
           const profile = normalizedProfile(business.profileUrl);
           if (seen.has(profile) || await this.db.businessLead.findFirst({ where: { OR: [
             { instagramUrl: { in: [profile, business.profileUrl] } }, { socialUrls: { array_contains: [profile] } },
@@ -103,16 +136,18 @@ export class TavilyBusinessSource implements BusinessDiscoverySource {
             observedUrl(detected.websiteUrl, combined) && dedicatedWebsite(detected.websiteUrl) ? detected.websiteUrl : null;
           const noWebsite = !detected.websiteUrl && !websiteUrl && confirmedNoWebsite(business.noWebsite, business.profileUrl, evidence);
           const activityDate = business.activityDate ? Date.parse(business.activityDate) : NaN;
-          const recent = Number.isFinite(activityDate) && activityDate <= Date.now() && Date.now() - activityDate <= 30 * 86400000 &&
+          const activityGrounded = grounded(business.activity, evidence);
+          const recent = activityGrounded && Number.isFinite(activityDate) && activityDate <= Date.now() && Date.now() - activityDate <= 30 * 86400000 &&
             business.activity.text.includes(business.activityDate!) && normalizedProfile(business.activity.sourceUrl) === profile;
           const parsed = candidateSchema.safeParse({ businessName: business.businessName.trim(), location: plan.location, category: plan.category,
             websiteUrl, instagramUrl: new URL(profile).hostname === 'instagram.com' ? profile : null, socialUrls: [profile],
             sourceUrl: business.identity.sourceUrl, verifiedAt: new Date().toISOString(),
-            facts: [business.identity, business.offering, business.activity, ...(noWebsite && business.noWebsite ? [business.noWebsite] : []),
-              ...(websiteUrl && detected.evidence ? [detected.evidence] : [])].map((q) => ({ claim: q.text, sourceUrl: q.sourceUrl })),
+            facts: [business.identity, business.offering, ...(activityGrounded ? [business.activity] : []), ...(noWebsite && business.noWebsite ? [business.noWebsite] : []),
+              ...(websiteUrl && detected.evidence ? [detected.evidence] : [])].map((q) => ({ claim: quoteText(q.text), sourceUrl: q.sourceUrl })),
             factors: { noWebsite, poorWebsite: false, activeSocial: recent, clearOffering: true, recentActivity: recent,
               operatingEvidence: recent, weakContact: false, serviceFit: true } });
-          if (!parsed.success) continue;
+          if (!parsed.success) { reject('invalid_candidate_evidence'); continue; }
+          if (!recent) output.missingRecentActivity++;
           if (!websiteUrl && !noWebsite) output.uncertainWebsites++;
           output.businesses.push({ candidate: parsed.data, provenance: { provider: 'tavily', query: plan.query, verificationQuery,
             collectedAt: new Date().toISOString(), sourceUrls: combined.map((r) => r.url) } });

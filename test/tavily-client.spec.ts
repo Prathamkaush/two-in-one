@@ -66,4 +66,39 @@ describe('Tavily client discovery', () => {
     const regions = ['Delhi', 'Noida'], categories = ['Bakeries', 'Salons'];
     expect(clientQueries('2026-09-25', regions, categories, 1)).not.toEqual(clientQueries('2026-09-26', regions, categories, 1));
   });
+  it('accepts observed title evidence, URL variants and Delhi, India while retaining uncertainty', async () => {
+    const p = 'https://www.instagram.com/harunstudios?hl=en';
+    const source = { url: p, title: 'Delhi | India (@harunstudios)',
+      content: 'Harun | Videographer | Photographer | Delhi | India. Camera & iPhone filmmaking. Fashion | Beauty | Weddings' };
+    const q = (text: string) => ({ sourceUrl: 'https://instagram.com/harunstudios/', text });
+    const { adapter, ai, api } = setup();
+    ai.extractStructuredData.mockReset().mockResolvedValueOnce({ businesses: [{ ...business,
+      businessName: 'Harun Studios', location: 'Delhi, India', profileUrl: 'https://instagram.com/harunstudios/',
+      identity: q('"Delhi | India (@harunstudios)"'), offering: q('"Camera & iPhone filmmaking"'),
+      activity: q('"Fashion | Beauty | Weddings"'), activityDate: '', noWebsite: null,
+    }] }).mockResolvedValue({ websiteUrl: null, evidence: null });
+    api.search.mockResolvedValue({ results: [source] });
+    const output = await adapter.discover(input);
+    expect(output.businesses).toHaveLength(1);
+    expect(output.businesses[0].candidate).toMatchObject({ location: 'Delhi', factors: { noWebsite: false, recentActivity: false, activeSocial: false } });
+    expect(output.businesses[0].candidate.facts[0].claim).toBe(source.title);
+    expect(output).toMatchObject({ extractedCandidates: 1, rejections: {}, missingRecentActivity: 1, uncertainWebsites: 1 });
+  });
+  it('reports ambiguous NCR location and directory URLs without treating them as leads', async () => {
+    const { adapter, ai } = setup();
+    ai.extractStructuredData.mockReset().mockResolvedValue({ businesses: [
+      { ...business, location: 'Delhi NCR' },
+      { ...business, profileUrl: 'https://example.com/directory/bakery' },
+    ] });
+    const output = await adapter.discover(input);
+    expect(output.businesses).toHaveLength(0);
+    expect(output.rejections).toEqual({ location_mismatch_or_ambiguous: 1, not_a_social_profile: 1 });
+  });
+  it('does not ground a quote against a different page selected by a query parameter', async () => {
+    const { adapter, ai, api } = setup();
+    ai.extractStructuredData.mockReset().mockResolvedValue({ businesses: [{ ...business,
+      identity: { ...business.identity, sourceUrl: 'https://example.com/business?id=other' } }] });
+    api.search.mockResolvedValue({ results: [result, { ...result, url: 'https://example.com/business?id=fixture' }] });
+    expect((await adapter.discover(input)).rejections).toEqual({ unsupported_identity_or_offering_quote: 1 });
+  });
 });

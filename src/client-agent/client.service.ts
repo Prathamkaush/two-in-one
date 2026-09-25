@@ -69,6 +69,7 @@ export class ClientService {
       const result = await this.discovery.discover({ date, regions: config.regions, categories: config.categories });
       for (const business of result.businesses) await this.ingest(business.candidate, business.provenance);
       discovery = { provider: 'tavily', queries: result.queries, errors: result.errors, duplicates: result.duplicates,
+        extractedCandidates: result.extractedCandidates, rejections: result.rejections, missingRecentActivity: result.missingRecentActivity,
         candidatesDiscovered: result.businesses.length, uncertainWebsites: result.uncertainWebsites };
       if (result.errors) await this.telegram.notify(`client-discovery-errors-${date}`,
         `CLIENT AGENT\nDiscovery had ${result.errors} failed queries or verification steps. Available candidates continue; inspect /admin/tavily/status and run logs.`, 'CLIENT');

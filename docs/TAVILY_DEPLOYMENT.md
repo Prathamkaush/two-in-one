@@ -80,6 +80,16 @@ scores and drafts. Telegram receives qualified leads or an honest empty report.
 local day: repeated `/admin/client/run` calls reuse it and do not send additional
 leads or restart a completed day's discovery.
 
+New client batches also report `extractedCandidates`, `rejections` (counts by reason),
+and `missingRecentActivity`. API `errors: 0` only means no caught request/processing
+exceptions; it does not mean the evidence passed candidate matching or qualification.
+Matching accepts equivalent Instagram profile URLs, quotes in returned titles or
+snippets, and explicit city labels such as `Delhi, India` or `New Delhi`. A general
+`Delhi NCR` label remains ambiguous for an individual city. Unknown activity dates
+remain unknown, and missing website results still do not establish no website.
+Deploying matching fixes does not modify historical batches or restart a completed
+day. Inspect a new daily batch to evaluate the changed matching and rejection counts.
+
 Create a Tavily research source **once**; existing RSS/operator sources remain:
 
 ```bash
