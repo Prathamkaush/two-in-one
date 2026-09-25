@@ -26,6 +26,18 @@ export const environmentSchema = z.object({
   RESEARCH_END_TIME: clock.default('17:00'),
   RESEARCH_BATCH_INTERVAL_MINUTES: z.coerce.number().int().min(1).max(240).default(30),
   OPENAI_ENABLED: bool.default('false'),
+  TAVILY_ENABLED: bool.default('false'),
+  TAVILY_API_KEY: optionalSecret,
+  TAVILY_MAX_RESULTS_PER_QUERY: z.coerce.number().int().min(1).max(10).default(5),
+  TAVILY_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(1000).max(60000).default(15000),
+  TAVILY_MAX_RETRIES: z.coerce.number().int().min(0).max(3).default(2),
+  TAVILY_DAILY_CREDIT_LIMIT: z.coerce.number().int().min(1).default(30),
+  TAVILY_MONTHLY_CREDIT_LIMIT: z.coerce.number().int().min(1).default(900),
+  TAVILY_REQUESTS_PER_MINUTE: z.coerce.number().int().min(1).max(100).default(20),
+  CLIENT_DISCOVERY_QUERIES: z.coerce.number().int().min(1).max(10).default(3),
+  CLIENT_DISCOVERY_CANDIDATES: z.coerce.number().int().min(1).max(20).default(8),
+  RESEARCH_TAVILY_QUERIES: z.coerce.number().int().min(1).max(5).default(1),
+  RESEARCH_TAVILY_EXTRACTS: z.coerce.number().int().min(0).max(5).default(1),
   OPENAI_API_KEY: optionalSecret,
   OPENAI_MODEL_SMALL: optionalSecret,
   OPENAI_MODEL_STRONG: optionalSecret,
@@ -51,6 +63,7 @@ export const environmentSchema = z.object({
   HTTP_TIMEOUT_MS: z.coerce.number().int().min(1000).max(60000).default(15000),
 }).superRefine((env, ctx) => {
   const issue = (path: string, message: string) => ctx.addIssue({ code: 'custom', path: [path], message });
+  if (env.TAVILY_ENABLED && !env.TAVILY_API_KEY) issue('TAVILY_API_KEY', 'Required when enabled');
   if (env.RESEARCH_START_TIME >= env.RESEARCH_END_TIME) issue('RESEARCH_END_TIME', 'Must be later than start on the same day');
   if (env.OPENAI_ENABLED) {
     if (!env.OPENAI_API_KEY) issue('OPENAI_API_KEY', 'Required when enabled');

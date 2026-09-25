@@ -15,11 +15,12 @@ export class AdminController {
   constructor(private readonly db: PrismaService, private readonly usage: UsageService,
     private readonly telegram: TelegramService, private readonly settings: Settings, private readonly queues: QueueService) {}
   @Get('status') async status() {
-    return { phase: 'core-mvp', agents: { client: 'verified-intake-mvp', research: 'rss-and-verified-intake-mvp' },
-      integrations: { openai: this.settings.get('OPENAI_ENABLED'), telegram: this.settings.get('TELEGRAM_ENABLED') },
+    return { phase: 'tavily-discovery', agents: { client: 'tavily-and-verified-intake', research: 'tavily-rss-and-verified-intake' },
+      integrations: { tavily: this.settings.get('TAVILY_ENABLED'), openai: this.settings.get('OPENAI_ENABLED'), telegram: this.settings.get('TELEGRAM_ENABLED') },
       latestRuns: await this.db.automationRun.findMany({ take: 10, orderBy: { startedAt: 'desc' } }) };
   }
   @Get('cost') cost() { return this.usage.summary(); }
+  @Get('reports/daily') dailyReports() { return this.db.dailyReport.findMany({ take: 30, orderBy: { createdAt: 'desc' } }); }
   @Get('queues') async queueStatus() {
     return Object.fromEntries(await Promise.all(QUEUES.map(async (name) => [name,
       await this.queues.get(name).getJobCounts('waiting', 'active', 'completed', 'failed', 'delayed')])));

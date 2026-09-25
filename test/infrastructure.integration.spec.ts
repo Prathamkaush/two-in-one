@@ -10,6 +10,8 @@ import { RedisService } from '../src/queues/redis.service';
 import { HealthController } from '../src/health/health.controller';
 import { UsageService } from '../src/usage/usage.service';
 import { TelegramService } from '../src/telegram/telegram.service';
+import { TavilyService } from '../src/tavily/tavily.service';
+import { validateEnvironment } from '../src/common/config/environment';
 
 describe('live infrastructure', () => {
   const db = new PrismaService();
@@ -73,5 +75,25 @@ describe('live infrastructure', () => {
     } finally {
       await worker.close(); await events.close(); await queue.obliterate({ force: true }); await queue.close();
     }
+  });
+  it('serializes Tavily credits across agents and caches responses across service restarts', async () => {
+    const settings = new Settings(new ConfigService(validateEnvironment({ DATABASE_URL: process.env.DATABASE_URL, ADMIN_API_KEY: 'a'.repeat(32),
+      TAVILY_ENABLED: 'true', TAVILY_API_KEY: 'mock-only', TAVILY_DAILY_CREDIT_LIMIT: '1', TAVILY_MAX_RETRIES: '0' })));
+    const service = new TavilyService(settings, db), originalFetch = global.fetch;
+    const fetchMock = jest.fn(async () => new Response(JSON.stringify({ results: [], usage: { credits: 1 } })));
+    global.fetch = fetchMock;
+    try {
+      const contexts = [{ agent: 'CLIENT' as const, key: 'concurrent-client' }, { agent: 'RESEARCH' as const, key: 'concurrent-research' }];
+      const results = await Promise.allSettled(contexts.map((context) => service.search('fixture query', context)));
+      expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+      expect(results.filter((r) => r.status === 'rejected')).toHaveLength(1);
+      const failed = results.find((r) => r.status === 'rejected');
+      if (failed?.status === 'rejected') expect(String(failed.reason)).toContain('credit limit');
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const restarted = new TavilyService(settings, db);
+      await restarted.search('fixture query', contexts[results.findIndex((r) => r.status === 'fulfilled')]);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect((await restarted.activity()).reservedCredits).toBe(1);
+    } finally { global.fetch = originalFetch; }
   });
 });

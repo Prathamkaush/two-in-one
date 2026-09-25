@@ -10,6 +10,7 @@ export class ResearchController {
   constructor(private readonly research: ResearchService, private readonly db: PrismaService, private readonly queues: QueueService) {}
   @Post('cycles') start() { return this.research.startCycle(); }
   @Get('cycles') cycles() { return this.db.researchCycle.findMany({ take: 50, orderBy: { createdAt: 'desc' } }); }
+  @Get('cycles/:id/items') items(@Param('id') id: string) { return this.db.researchItem.findMany({ where: { cycleId: id }, take: 100, orderBy: { collectedAt: 'desc' } }); }
   @Get('sources') sources() { return this.db.researchSource.findMany(); }
   @Post('sources') source(@Body() body: unknown) { return this.research.addSource(body); }
   @Post('collect') collect() { return this.research.collectNow(); }

@@ -7,6 +7,9 @@ import { TelegramService } from '../src/telegram/telegram.service';
 import { UsageService } from '../src/usage/usage.service';
 import { ClientService } from '../src/client-agent/client.service';
 import { ResearchService } from '../src/research-agent/research.service';
+import { TavilyService } from '../src/tavily/tavily.service';
+import { TavilyBusinessSource } from '../src/client-agent/discovery/tavily.source';
+import { validateEnvironment } from '../src/common/config/environment';
 
 describe('agent happy paths with real PostgreSQL and mocked paid integrations', () => {
   const db = new PrismaService();
@@ -81,5 +84,68 @@ describe('agent happy paths with real PostgreSQL and mocked paid integrations', 
     const production = new Settings(new ConfigService({ NODE_ENV: 'production' }));
     const research = new ResearchService(db, production, queues, ai, telegram, {} as UsageService);
     await expect(research.finalize('any', true)).rejects.toThrow('disabled in production');
+  });
+  it('runs Tavily client discovery through qualification, drafts and the client Telegram route', async () => {
+    const config = new Settings(new ConfigService(validateEnvironment({ DATABASE_URL: process.env.DATABASE_URL, ADMIN_API_KEY: 'a'.repeat(32),
+      TAVILY_ENABLED: 'true', TAVILY_API_KEY: 'mock-only', CLIENT_REGIONS: 'Delhi', CLIENT_CATEGORIES: 'Bakeries',
+      CLIENT_DISCOVERY_QUERIES: '1', OPENAI_MODEL_SMALL: 'fixture' })));
+    const date = new Date().toISOString().slice(0, 10), profile = 'https://instagram.com/tavily_fixture';
+    const q = (text: string) => ({ sourceUrl: profile, text });
+    const business = { businessName: 'Tavily Fixture Bakery', category: 'Bakeries', location: 'Delhi', profileUrl: profile,
+      identity: q('Tavily Fixture Bakery in Delhi'), offering: q('We sell handmade cakes.'), activity: q(`Taking new cake orders ${date}`),
+      activityDate: date, noWebsite: q('We have no website. Please contact us here.') };
+    const tavily = { search: jest.fn().mockResolvedValue({ results: [{ url: profile, title: business.businessName,
+      content: [business.identity.text, business.offering.text, business.activity.text, business.noWebsite.text].join('\n') }] }) } as unknown as TavilyService;
+    const discoveryAI = { extractStructuredData: jest.fn().mockResolvedValueOnce({ businesses: [business] }).mockResolvedValue({ websiteUrl: null, evidence: null }),
+      generatePitch: jest.fn().mockResolvedValue({ message: 'Would a dedicated cake-order website help your bakery?', supportingEvidence: [] }) } as unknown as AIService;
+    const source = new TavilyBusinessSource(tavily, discoveryAI, config, db);
+    const client = new ClientService(db, config, queues, discoveryAI, telegram, source);
+    // Finish the remaining operator fixture so this discovery result is evaluated independently.
+    await db.businessLead.updateMany({ where: { businessName: { startsWith: 'Fixture Bakery' } }, data: { status: 'REJECTED' } });
+    await client.discover('2026-10-01');
+    const batch = await db.clientBatch.findUniqueOrThrow({ where: { date: '2026-10-01' } });
+    await client.audit(batch.id); await client.analyze(batch.id); await client.draftAndReport(batch.id);
+    const lead = await db.businessLead.findFirstOrThrow({ where: { instagramUrl: profile }, include: { drafts: true, sources: true } });
+    expect(lead.status).toBe('PRESENTED'); expect(lead.websiteStatus).toBe('NO_WEBSITE'); expect(lead.drafts).toHaveLength(1);
+    expect(lead.sources[0].provider).toBe('tavily'); expect(lead.sources[0].evidence).toHaveProperty('discovery.query');
+    expect(telegramMock.notify).toHaveBeenLastCalledWith(expect.any(String), expect.stringContaining('Tavily Fixture Bakery'), 'CLIENT');
+    await client.discover('2026-10-01'); expect(tavily.search).toHaveBeenCalledTimes(2);
+    const duplicate = await client.ingest({ businessName: business.businessName, category: 'Bakeries', location: 'Delhi',
+      instagramUrl: 'https://instagram.com/alternate_fixture_profile', websiteUrl: null, sourceUrl: profile, verifiedAt: new Date().toISOString(),
+      facts: [{ claim: business.identity.text, sourceUrl: profile }], factors: { noWebsite: true, poorWebsite: false, activeSocial: true,
+        clearOffering: true, recentActivity: true, operatingEvidence: true, weakContact: false, serviceFit: true } });
+    expect(duplicate.id).toBe(lead.id); expect(duplicate.status).toBe('PRESENTED');
+    const websiteCandidate = { businessName: 'Website fixture', category: 'bakeries', location: 'delhi', websiteUrl: 'https://www.example.net/about',
+      instagramUrl: 'https://instagram.com/website_fixture', sourceUrl: 'https://example.net', verifiedAt: new Date().toISOString(),
+      facts: [{ claim: 'Website fixture in Delhi sells cakes.', sourceUrl: 'https://example.net' }],
+      factors: { noWebsite: false, poorWebsite: false, activeSocial: true, clearOffering: true, recentActivity: true, operatingEvidence: true, weakContact: false, serviceFit: true } };
+    const websiteLead = await client.ingest(websiteCandidate);
+    const alias = await client.ingest({ ...websiteCandidate, businessName: 'Website fixture alias', instagramUrl: 'https://instagram.com/website_fixture_alias', websiteUrl: 'https://example.net/contact' });
+    expect(alias.id).toBe(websiteLead.id); expect(alias.location).toBe('Delhi'); expect(alias.category).toBe('Bakeries');
+  });
+  it('collects Tavily research with provenance, processes it and completes a one-day development cycle', async () => {
+    const config = new Settings(new ConfigService(validateEnvironment({ DATABASE_URL: process.env.DATABASE_URL, ADMIN_API_KEY: 'a'.repeat(32),
+      RESEARCH_CYCLE_DAYS: '1', TAVILY_ENABLED: 'true', TAVILY_API_KEY: 'mock-only', RESEARCH_TAVILY_EXTRACTS: '0', NODE_ENV: 'test' })));
+    const api = { enabled: () => true, search: jest.fn().mockResolvedValue({ results: [
+      { url: 'https://example.com/tavily-evidence', title: 'Manual scheduling', content: 'Operators complain about losing hours reconciling spreadsheets manually.' },
+      { url: 'https://example.com/tavily-evidence?utm_source=duplicate', title: 'Manual scheduling', content: 'Operators complain about losing hours reconciling spreadsheets manually.' },
+    ] }), activity: jest.fn().mockResolvedValue({ searches: 1, extracts: 0, failed: 0, reservedCredits: 1, queries: ['small business complaints'] }) };
+    const usage = { summary: jest.fn().mockResolvedValue({ daily: 0, monthly: 0 }) } as unknown as UsageService;
+    const research = new ResearchService(db, config, queues, ai, telegram, usage, api as unknown as TavilyService);
+    const source = await research.addSource({ name: 'Tavily e2e evidence', adapter: 'tavily', configuration: { topics: ['small business'], lenses: ['complaints'] } });
+    const cycle = await research.startCycle(); expect(cycle.endDate.getTime() - cycle.startDate.getTime()).toBe(86400000);
+    await research.collect(cycle.id, source.id, 1);
+    const items = await db.researchItem.findMany({ where: { cycleId: cycle.id } }); expect(items).toHaveLength(1);
+    expect(items[0].metadata).toMatchObject({ provider: 'tavily', query: 'small business complaints' });
+    aiMock.classifyResearch.mockResolvedValueOnce({ relevant: true, topic: 'Scheduling', summary: 'Manual spreadsheet reconciliation', confidence: 0.8,
+      signals: [{ problem: 'Manual reconciliation', category: 'Scheduling', evidenceQuote: 'losing hours reconciling spreadsheets manually.', confidence: 0.8 }] });
+    await research.process(items[0].id); await research.cluster(items[0].id);
+    await research.collect(cycle.id, source.id, 1); expect(await db.researchItem.count({ where: { cycleId: cycle.id } })).toBe(1);
+    const summary = await research.dailySummary(); expect(summary).toHaveProperty('tavily.searches', 1);
+    expect(JSON.stringify(summary)).not.toMatch(/opportunities|recommendations/);
+    await research.finalize(cycle.id, true); await research.monthly(cycle.id);
+    const report = await db.monthlyReport.findUniqueOrThrow({ where: { cycleId: cycle.id } });
+    expect(report.insufficiencyReason).toContain('Insufficient traceable evidence');
+    expect((await db.researchCycle.findUniqueOrThrow({ where: { id: cycle.id } })).status).toBe('COMPLETED');
   });
 });

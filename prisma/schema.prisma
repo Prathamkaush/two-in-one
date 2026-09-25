@@ -99,10 +99,32 @@ model ClientBatch {
   id         String   @id @default(cuid())
   date       String   @unique
   candidates Json
+  discovery  Json     @default("{}")
   selected   Json     @default("[]")
   status     String   @default("DISCOVERED")
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
+}
+
+// One durable reservation per HTTP attempt, including failed/ambiguous attempts.
+model TavilyRequest {
+  id              String   @id @default(cuid())
+  requestKey      String   @unique
+  agent           Agent
+  operation       String
+  query           String
+  attempt         Int
+  status          String   @default("RESERVED")
+  reservedCredits Int      @default(1)
+  reportedCredits Float?
+  result          Json?
+  errorCode       String?
+  retryAfterMs    Int      @default(0)
+  createdAt       DateTime @default(now())
+  finishedAt      DateTime?
+
+  @@index([createdAt])
+  @@index([agent, createdAt])
 }
 
 model BusinessSource {

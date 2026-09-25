@@ -12,8 +12,8 @@ function researchWorker(queue: string) {
       try {
         return await this.executions.execute(queue, 'RESEARCH', job, async () => {
           if (queue === 'research-collection') {
-            const data = z.object({ cycleId: z.string(), sourceId: z.string() }).parse(job.data);
-            await this.research.collect(data.cycleId, data.sourceId);
+            const data = z.object({ cycleId: z.string(), sourceId: z.string(), slot: z.number().int().nonnegative().optional() }).parse(job.data);
+            await this.research.collect(data.cycleId, data.sourceId, data.slot);
           } else if (queue === 'monthly-analysis') {
             await this.research.monthly(z.object({ cycleId: z.string() }).parse(job.data).cycleId);
           } else {

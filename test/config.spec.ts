@@ -16,6 +16,12 @@ describe('configuration', () => {
     expect(env.OPENAI_ENABLED).toBe(false);
     expect(env.CLIENT_AGENT_ENABLED).toBe(false);
     expect(env.RESEARCH_CYCLE_DAYS).toBe(30);
+    expect(env.TAVILY_ENABLED).toBe(false);
+  });
+  it('requires Tavily credentials and bounds discovery volume when enabled', () => {
+    expect(() => validateEnvironment({ ...base, TAVILY_ENABLED: 'true' })).toThrow('TAVILY_API_KEY');
+    expect(() => validateEnvironment({ ...base, TAVILY_MAX_RETRIES: '100' })).toThrow('TAVILY_MAX_RETRIES');
+    expect(() => validateEnvironment({ ...base, CLIENT_DISCOVERY_CANDIDATES: '1000' })).toThrow('CLIENT_DISCOVERY_CANDIDATES');
   });
   it.each([{ TIMEZONE: 'invalid' }, { RESEARCH_START_TIME: '18:00' }, { RESEARCH_BATCH_INTERVAL_MINUTES: '0' },
     { OPENAI_ENABLED: 'true' }, { TELEGRAM_ENABLED: 'true' }, { ADMIN_API_KEY: 'short' }, { CLIENT_AGENT_ENABLED: 'true' }])('rejects unsafe values %p', (values) => {

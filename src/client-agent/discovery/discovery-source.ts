@@ -1,16 +1,16 @@
+import { Candidate } from '../client.schemas';
 export interface BusinessEvidence {
-  externalId: string;
-  businessName: string;
-  category?: string;
-  location?: string;
-  websiteUrl?: string;
-  instagramUrl?: string;
-  sourceUrl: string;
-  collectedAt: Date;
-  facts: Array<{ claim: string; sourceUrl: string }>;
+  candidate: Candidate;
+  provenance: { provider: string; query: string; verificationQuery: string; collectedAt: string; sourceUrls: string[] };
 }
-// Provider choice and terms must be confirmed before implementing a live adapter.
+export interface DiscoveryResult {
+  businesses: BusinessEvidence[];
+  queries: string[];
+  errors: number;
+  duplicates: number;
+  uncertainWebsites: number;
+}
 export interface BusinessDiscoverySource {
   readonly name: string;
-  discover(query: { location: string; categories: string[]; limit: number }): Promise<BusinessEvidence[]>;
+  discover(input: { date: string; regions: string[]; categories: string[] }): Promise<DiscoveryResult>;
 }

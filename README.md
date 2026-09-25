@@ -1,6 +1,6 @@
 # Dual Automation Platform
 
-One NestJS application, PostgreSQL/Prisma, Redis/BullMQ, and shared OpenAI/Telegram services. This is a working core MVP, with live lead discovery still pending a permitted provider. External integrations are disabled in the generated local configuration. No Instagram login, browser automation, or automatic outreach exists.
+One NestJS application, PostgreSQL/Prisma, Redis/BullMQ, and shared OpenAI/Telegram/Tavily services. Tavily supplies live client discovery and a separate market-evidence research adapter. External integrations default to disabled. No Instagram login, browser automation, or automatic outreach exists. See [Tavily deployment and manual verification](docs/TAVILY_DEPLOYMENT.md).
 
 ## Start locally
 
@@ -32,10 +32,10 @@ npm.cmd run dev
 | Phase | Implemented | Main files |
 | --- | --- | --- |
 | Foundation | Validated configuration, normalized schema, migrations, queues, health, authentication, sanitized logging, structured AI, reserved-cost accounting, notification outbox, Docker | `src/common`, `src/database`, `src/queues`, `src/ai`, `src/usage`, `src/telegram`, `prisma`, `Dockerfile`, `docker-compose.yml` |
-| Client MVP | Verified candidate intake, public HTTPS checks, configurable scoring, daily top selection, saved drafts, Telegram delivery, manual status updates | `src/client-agent`, `src/scheduler` |
-| Research MVP | RSS/operator adapters, independent collection jobs, provenance, normalization, URL/content deduplication, quoted signal extraction, exact problem clustering, operational summaries | `src/research-agent`, `src/scheduler` |
+| Client MVP | Tavily discovery, verified candidate intake, public HTTPS checks, configurable scoring, daily top selection, saved drafts, Telegram delivery, manual status updates | `src/client-agent`, `src/tavily`, `src/scheduler` |
+| Research MVP | Tavily/RSS/operator adapters, independent collection jobs, provenance, normalization, URL/content deduplication, quoted signal extraction, exact problem clustering, operational summaries | `src/research-agent`, `src/tavily`, `src/scheduler` |
 | Monthly MVP | Cycle closure guard, bounded evidence synthesis, reference validation, candidate/final-opportunity persistence, authenticated report retrieval, insufficiency reporting | `src/research-agent/research.service.ts`, `opportunity.schema.ts` |
-| Expansion | Pending: live business discovery, additional licensed/API sources, semantic clustering, deeper competitor research, PageSpeed/Lighthouse, dashboard, cross-cycle comparison | Provider interfaces already exist |
+| Expansion | Pending: additional licensed/API sources, semantic clustering, deeper competitor research, PageSpeed/Lighthouse, dashboard, cross-cycle comparison | Provider interfaces already exist |
 
 ## Client market and configuration
 
@@ -43,7 +43,7 @@ Defaults target Delhi, Gurugram, Noida, Faridabad, and Ghaziabad. Categories mat
 
 `CLIENT_REGIONS` and `CLIENT_CATEGORIES` are comma-separated defaults. `GET/PUT /admin/client/configuration` provides a database override with `regions`, `categories`, `dailyLimit`, `weights`, and `minimumScore`. Scoring is versioned through a weights snapshot on each analysis. No-website evidence has the largest default weight. Lack of a supplied URL alone is **not** treated as proof of no website.
 
-The initial source is **operator-verified intake**, not autonomous discovery. `BusinessDiscoverySource` is the integration seam for a future permitted data/search provider. The daily job currently researches the existing verified candidate pool. Select a provider with appropriate data rights and coverage before enabling unattended lead discovery.
+When `TAVILY_ENABLED=true`, `BusinessDiscoverySource` searches rotating region/category combinations before the existing daily pipeline runs. Website verification, quoted evidence checks and identity deduplication precede qualification. Without Tavily, operator-verified intake continues to work. Configure and test the provider before enabling unattended discovery; missing website evidence remains unknown.
 
 `POST /admin/client/candidates` accepts:
 
@@ -65,7 +65,7 @@ The initial source is **operator-verified intake**, not autonomous discovery. `B
 }
 ```
 
-Replace every illustrative value with verified evidence; these are not real leads. Region/category names must match the configuration. Evidence older than 30 days does not qualify. Identity deduplication uses the Instagram profile. Intake does not overwrite an existing lead or its contact history.
+Replace every illustrative value with verified evidence; these are not real leads. Region/category names must match the configuration. Evidence older than 30 days does not qualify. Identity deduplication uses normalized profiles, business name/location and website domains. `instagramUrl` may be null when `socialUrls` contains another verified public social profile. Intake does not overwrite an existing lead or its contact history.
 
 `POST /admin/client/run` starts the queue chain: discovery pool → website checks → scoring → top six → AI drafts → Telegram outbox. OpenAI must be configured for draft generation. Up to 100 candidates are examined; only those meeting thresholds are selected. A day may produce fewer than six. Unselected qualified candidates remain eligible the next day, while presented leads are excluded. `GET /admin/client/leads` returns recent records and drafts. `PATCH /admin/client/leads/:id` accepts `status` and/or `notes` for manual follow-up.
 
@@ -75,7 +75,7 @@ Website checks use HTTPS only, pin public DNS addresses, reject private/reserved
 
 1. Create permitted sources using `POST /admin/research/sources` with `{ "name": "My permitted feed", "adapter": "rss", "url": "https://..." }`. Use `adapter: "operator"` without a URL for verified imports. No feeds are enabled by default.
 2. Start a cycle with `POST /admin/research/cycles`. Only one active/analyzing cycle is allowed. Historical cycles are preserved.
-3. Trigger RSS batches with `POST /admin/research/collect`, or import a record with `POST /admin/research/cycles/:cycleId/items/:sourceId` using `sourceUrl`, `title`, `content`, and optional ISO `publishedAt`.
+3. Trigger RSS/Tavily batches with `POST /admin/research/collect`, or import a record with `POST /admin/research/cycles/:cycleId/items/:sourceId` using `sourceUrl`, `title`, `content`, and optional ISO `publishedAt`. Tavily sources use `adapter: "tavily"` with optional `configuration: { topics: [...], lenses: [...] }`.
 4. Inspect cycles at `GET /admin/research/cycles`. Trigger an operational report with `POST /admin/research/summary`.
 5. Finalize an elapsed cycle with `POST /admin/research/cycles/:id/finalize` and `{}`. Pending extraction prevents finalization. The finalization job performs monthly synthesis and saves the report.
 6. Retrieve the complete JSON report with `GET /admin/research/reports/:id`. Telegram includes the authenticated API path; a public dashboard/report link is not yet provided.

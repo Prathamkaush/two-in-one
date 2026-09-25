@@ -11,12 +11,14 @@ import { publicUrl } from '../common/security/public-http';
 import { RssSource } from './sources/rss.source';
 import { canonicalUrl, clusterKey, contentHash, normalizeContent } from './normalization';
 import { finalReportSchema } from './opportunity.schema';
+import { TavilyService } from '../tavily/tavily.service';
+import { TavilyResearchSource, tavilyResearchConfig } from './sources/tavily.source';
 
 export const researchInput = z.object({ sourceUrl: z.string().url().max(2048), title: z.string().min(1).max(500), content: z.string().min(20).max(50000), publishedAt: z.string().datetime().optional() }).strict();
 @Injectable()
 export class ResearchService {
   constructor(private readonly db: PrismaService, private readonly settings: Settings, private readonly queues: QueueService,
-    private readonly ai: AIService, private readonly telegram: TelegramService, private readonly usage: UsageService) {}
+    private readonly ai: AIService, private readonly telegram: TelegramService, private readonly usage: UsageService, private readonly tavily?: TavilyService) {}
   async startCycle() {
     return this.db.$transaction(async (tx) => {
       await tx.$queryRaw`SELECT pg_advisory_xact_lock(71829342)::text`;
@@ -27,38 +29,42 @@ export class ResearchService {
     }, { maxWait: 15000 });
   }
   async addSource(body: unknown) {
-    const parsed = z.object({ name: z.string().min(2).max(100), adapter: z.enum(['rss', 'operator']), url: z.string().url().optional() }).strict().safeParse(body);
+    const parsed = z.object({ name: z.string().min(2).max(100), adapter: z.enum(['rss', 'operator', 'tavily']), url: z.string().url().optional(),
+      configuration: tavilyResearchConfig.optional() }).strict().safeParse(body);
     if (!parsed.success) throw new BadRequestException('Invalid source');
     if (parsed.data.adapter === 'rss') { if (!parsed.data.url) throw new BadRequestException('RSS URL required'); publicUrl(parsed.data.url); }
     return this.db.researchSource.create({ data: { name: parsed.data.name, adapter: parsed.data.adapter, enabled: true,
-      configuration: parsed.data.url ? { url: parsed.data.url } : {} } });
+      configuration: parsed.data.adapter === 'tavily' ? tavilyResearchConfig.parse(parsed.data.configuration ?? {}) : parsed.data.url ? { url: parsed.data.url } : {} } });
   }
   async collectNow() {
     const cycle = await this.db.researchCycle.findFirstOrThrow({ where: { status: 'ACTIVE' } });
     if (new Date() >= cycle.endDate) throw new ConflictException('Cycle collection window has ended');
-    const sources = await this.db.researchSource.findMany({ where: { enabled: true, adapter: 'rss' } });
-    const slot = new Date().toISOString().slice(0, 16);
+    const sources = await this.db.researchSource.findMany({ where: { enabled: true, adapter: { in: ['rss', ...(this.settings.get('TAVILY_ENABLED') ? ['tavily'] : [])] } } });
+    const slot = Math.floor(Date.now() / (this.settings.get('RESEARCH_BATCH_INTERVAL_MINUTES') * 60000));
     const jobs = [];
-    for (const source of sources) jobs.push(await this.queues.enqueue('research-collection', 'collect', `${cycle.id}-${source.id}-${slot}`, { cycleId: cycle.id, sourceId: source.id }));
-    return { jobs, note: sources.length ? undefined : 'No RSS sources configured. Add permitted feeds or import verified evidence.' };
+    for (const source of sources) jobs.push(await this.queues.enqueue('research-collection', 'collect', `${cycle.id}-${source.id}-${slot}`, { cycleId: cycle.id, sourceId: source.id, slot }));
+    return { jobs, note: sources.length ? undefined : 'No enabled live sources. Add RSS or configure a Tavily source.' };
   }
-  async collect(cycleId: string, sourceId: string) {
+  async collect(cycleId: string, sourceId: string, slot = 0) {
     const cycle = await this.db.researchCycle.findUniqueOrThrow({ where: { id: cycleId } });
     if (cycle.status !== 'ACTIVE' || new Date() >= cycle.endDate) return;
     const source = await this.db.researchSource.findUniqueOrThrow({ where: { id: sourceId } });
-    if (!source.enabled || source.adapter !== 'rss') return;
-    const config = z.object({ url: z.string().url() }).parse(source.configuration);
-    const items = await new RssSource(config.url).collect({ since: cycle.startDate, limit: 50 });
+    if (!source.enabled || !['rss', 'tavily'].includes(source.adapter)) return;
+    if (source.adapter === 'tavily' && !this.tavily?.enabled()) return;
+    const adapter = source.adapter === 'rss' ? new RssSource(z.object({ url: z.string().url() }).parse(source.configuration).url) :
+      new TavilyResearchSource(this.tavily!, this.settings, { key: `${cycleId}-${sourceId}-${slot}`, slot, configuration: source.configuration,
+        knownUrls: new Set((await this.db.researchItem.findMany({ where: { cycleId }, select: { canonicalUrl: true } })).map((i) => i.canonicalUrl)) });
+    const items = await adapter.collect({ since: cycle.startDate, limit: 50 });
     for (const item of items) {
       try {
         await this.ingest(cycleId, sourceId, { sourceUrl: item.sourceUrl, title: item.title, content: item.content,
-          ...(item.publishedAt ? { publishedAt: item.publishedAt.toISOString() } : {}) });
+          ...(item.publishedAt ? { publishedAt: item.publishedAt.toISOString() } : {}) }, item.metadata);
       } catch (error) {
         if (!(error instanceof BadRequestException)) throw error;
       }
     }
   }
-  async ingest(cycleId: string, sourceId: string, body: unknown) {
+  async ingest(cycleId: string, sourceId: string, body: unknown, metadata: Record<string, string | number | boolean> = {}) {
     const result = researchInput.safeParse(body); if (!result.success) throw new BadRequestException('Invalid research evidence');
     const input = result.data;
     publicUrl(input.sourceUrl);
@@ -73,7 +79,7 @@ export class ResearchService {
       if (existing) return existing;
       const duplicate = await tx.researchItem.findFirst({ where: { cycleId, contentHash: hash } });
       const created = await tx.researchItem.create({ data: { cycleId, sourceId, sourceUrl: input.sourceUrl, canonicalUrl: url, contentHash: hash,
-        title: input.title, content, publishedAt: input.publishedAt ? new Date(input.publishedAt) : undefined,
+        title: input.title, content, metadata, publishedAt: input.publishedAt ? new Date(input.publishedAt) : undefined,
         status: duplicate ? 'DUPLICATE' : 'PENDING', duplicateOfId: duplicate?.id } });
       await tx.researchCycle.update({ where: { id: cycleId }, data: { totalItemsCollected: { increment: 1 } } });
       return created;
@@ -115,13 +121,16 @@ export class ResearchService {
     const today = items.filter((item) => localClock(item.collectedAt, cycle.timezone).date === date);
     const bySource: Record<string, number> = {}; for (const item of today) bySource[item.source.name] = (bySource[item.source.name] ?? 0) + 1;
     const costs = await this.usage.summary();
+    const tavily = this.tavily ? await this.tavily.activity('RESEARCH') : null;
     const day = Math.min(Math.max(1, Math.ceil((cycle.endDate.getTime() - cycle.startDate.getTime()) / 86400000)), Math.floor((Date.now() - cycle.startDate.getTime()) / 86400000) + 1);
     const content = { date, day, totalItemsExamined: today.length, sources: bySource, pending: today.filter((i) => i.status === 'PENDING').length,
       processed: today.filter((i) => i.status === 'PROCESSED').length, dataStored: true, platformCostUtcDay: costs.daily,
+      duplicates: today.filter((i) => i.status === 'DUPLICATE').length, tavily,
+      nextCollectionWindow: `${this.settings.get('RESEARCH_START_TIME')}-${this.settings.get('RESEARCH_END_TIME')} ${cycle.timezone}, every ${this.settings.get('RESEARCH_BATCH_INTERVAL_MINUTES')} minutes`,
       status: today.length ? 'Collection recorded; inspect pending count' : 'No items collected; check configured sources' };
     await this.db.dailyReport.upsert({ where: { agent_date: { agent: 'RESEARCH', date } }, create: { agent: 'RESEARCH', date, cycleId: cycle.id, content }, update: { content } });
     await this.db.researchCycle.update({ where: { id: cycle.id }, data: { currentDay: day } });
-    await this.telegram.notify(`research-summary-${date}`, `RESEARCH AGENT\n${date}\nStatus: ${content.status}\nCycle day: ${day}\nSources: ${JSON.stringify(bySource)}\nItems stored: ${today.length}\nPending: ${content.pending}\nPlatform AI cost (UTC day): $${costs.daily.toFixed(4)}\nOperational report only; no opportunity recommendations during collection.`, "RESEARCH");
+    await this.telegram.notify(`research-summary-${date}`, `RESEARCH AGENT\n${date}\nStatus: ${content.status}\nCycle day: ${day}\nSources: ${JSON.stringify(bySource)}\nItems stored: ${today.length}\nProcessed: ${content.processed} | Pending: ${content.pending} | Content duplicates: ${content.duplicates}\nTavily (last 24h): ${tavily?.searches ?? 0} search attempts, ${tavily?.extracts ?? 0} extracts, ${tavily?.failed ?? 0} failures, ${tavily?.reservedCredits ?? 0} reserved credits\nPlatform AI cost (UTC day): $${costs.daily.toFixed(4)}\nCollection schedule: ${content.nextCollectionWindow}\nOperational report only; no opportunity recommendations during collection.`, "RESEARCH");
     return content;
   }
   async finalize(cycleId: string, simulate = false) {
