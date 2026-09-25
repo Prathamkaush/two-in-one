@@ -2,6 +2,50 @@
 
 One NestJS application, PostgreSQL/Prisma, Redis/BullMQ, and shared OpenAI/Telegram/Tavily services. Tavily supplies live client discovery and a separate market-evidence research adapter. External integrations default to disabled. No Instagram login, browser automation, or automatic outreach exists. See [Tavily deployment and manual verification](docs/TAVILY_DEPLOYMENT.md).
 
+## Current status and server deployment
+
+The Tavily implementation is complete for this MVP. No additional implementation phase is required before deployment and live verification. Automated validation passed 96 unit tests, 11 PostgreSQL/Redis integration tests, TypeScript, lint, and build. External API calls were mocked: these results do not establish real Tavily coverage or Telegram delivery on the server.
+
+Run deployment commands in the VPS terminal, not in Telegram:
+
+```bash
+cd /var/www/two-in-one
+git pull --ff-only
+```
+
+Before rebuilding, update the existing server `.env` using the Tavily settings in [.env.example](.env.example). Set `TAVILY_ENABLED=true` and `TAVILY_API_KEY` to your key, configure the credit limits, and keep `CLIENT_AGENT_ENABLED=false` until the manual checks pass. Preserve existing OpenAI pricing, Telegram credentials, database settings, and server-specific port configuration. Each environment key should have only one definition; Compose `environment` values override `env_file` values.
+
+```bash
+docker compose build app migrate
+docker compose run --rm migrate
+docker compose up -d --force-recreate app
+docker compose logs --tail=50 app
+curl -sS http://127.0.0.1:3010/health/ready
+```
+
+The health command assumes the existing VPS host port `3010`; the repository's local default is `3000`. Allow startup to finish before checking readiness. If Git reports local Compose changes, preserve the VPS port mapping and healthcheck while resolving them.
+
+Complete these checks before enabling unattended client runs. All `/admin/*` endpoints require the admin Bearer token; the [deployment guide](docs/TAVILY_DEPLOYMENT.md#manual-checks) includes copyable commands that prompt for it.
+
+| Check | Endpoint/action | Evidence of success |
+| --- | --- | --- |
+| Tavily connectivity | `POST /admin/tavily/test` | Successful response; inspect `GET /admin/tavily/status` for usage/errors |
+| Client pipeline | `POST /admin/client/run` | Batch reaches `COMPLETED` in `GET /admin/client/batches`; inspect evidence and drafts in `GET /admin/client/leads` |
+| Research source | `POST /admin/research/sources` with `adapter: "tavily"` | Source appears in `GET /admin/research/sources`; existing RSS sources remain |
+| Research collection | Inspect `GET /admin/research/cycles`, start a cycle only if none is active, then `POST /admin/research/collect` | Items appear in `GET /admin/research/cycles/<cycle-id>/items` and finish processing |
+| Reports and delivery | `POST /admin/research/summary`; inspect `GET /admin/reports/daily` | Actual messages arrive through the appropriate Telegram bot |
+
+A returned job or notification ID means queued, not finished or delivered. Inspect `GET /admin/queues` for failures. Client runs reuse one batch per local day, so repeating the run endpoint does not restart completed discovery or send extra leads. Research collection reuses the current configured batch interval.
+
+Once live evidence and Telegram delivery are verified, set `CLIENT_AGENT_ENABLED=true` and, if desired, `RESEARCH_AGENT_ENABLED=true`, then recreate `app`. Scheduling follows the configured times and timezone; enabling a flag does not immediately trigger work. Tavily being enabled alone does not create a research source or start a research cycle.
+
+### MVP boundaries and later phases
+
+- Automated client qualification prioritizes explicit, evidence-backed **no-website** opportunities. Missing search results remain `UNKNOWN`. A day can produce fewer than six leads or none; quality thresholds are not lowered to fill the quota.
+- Automated weak/outdated-website detection is a later enhancement. Existing HTTP checks do not establish website quality; operator-verified weak-website candidates remain supported.
+- Research sends operational summaries during the cycle. Business opportunities are generated only after cycle closure, with fewer results when evidence is insufficient.
+- Deeper competitor research, semantic clustering, additional sources, a dashboard, and cross-cycle comparison are later enhancements, not prerequisites for running this MVP.
+
 ## Start locally
 
 Requires Node 22+ and Docker Desktop with its Linux engine running. On Windows use `npm.cmd`/`npx.cmd` if PowerShell blocks npm scripts.
@@ -90,6 +134,8 @@ Monthly synthesis receives at most 60 items and a bounded 36 KB evidence represe
 
 Start with `.env.example`. Required foundation values: `DATABASE_URL`, `REDIS_HOST`, `REDIS_PORT`, `ADMIN_API_KEY`, `TIMEZONE`. Compose also requires `POSTGRES_PASSWORD`. For deployment, replace the local database password and keep its URL representation correctly encoded.
 
+For Tavily set `TAVILY_ENABLED=true` and `TAVILY_API_KEY`. Search results, request timeouts, retries, searches per batch, candidate verification, and research Extract calls are bounded by the settings in `.env.example`. Both agents share `TAVILY_DAILY_CREDIT_LIMIT` and `TAVILY_MONTHLY_CREDIT_LIMIT`, independently of OpenAI's dollar budgets. Each HTTP attempt reserves credits before sending; failed or ambiguous attempts retain conservative reservations, and successful responses are cached for retries. `GET /admin/tavily/status` reports recent activity without exposing the key. See the [deployment guide](docs/TAVILY_DEPLOYMENT.md#qualification-and-cost-limits) for accounting details.
+
 For OpenAI set `OPENAI_ENABLED=true`, `OPENAI_API_KEY`, `OPENAI_MODEL_SMALL`, `OPENAI_MODEL_STRONG`, and `OPENAI_MODEL_PRICES`. Prices are explicit USD per million tokens, for example the **shape only**: `{"your-model":{"input":1,"output":4}}`. Choose current supported models and supply their actual rates; this example is not a pricing claim. Configure daily/monthly limits and output limits. Final synthesis has a separate 12,000-token default cap.
 
 AI calls use the SDK Responses API with Zod structured outputs, following the [official structured-output documentation](https://developers.openai.com/api/docs/guides/structured-outputs). The service disables SDK retries, treats evidence as untrusted, provides no executable tools, and requests no remote URL fetches from the model. Structured output is not a factual guarantee: review all outreach and opportunities.
@@ -117,7 +163,7 @@ npm.cmd run build
 node scripts/smoke.cjs
 ```
 
-Integration tests require local PostgreSQL/Redis and permission to create a temporary database. The runner creates and migrates a uniquely named test database, runs tests, then removes only that test database. Paid AI and Telegram calls are mocked. The tests drive both agent workflows through persistence/reporting without waiting for schedules or 30 days.
+Integration tests require local PostgreSQL/Redis and permission to create a temporary database. The runner creates and migrates a uniquely named test database, runs tests, then removes only that test database. Tavily, OpenAI, and Telegram calls are mocked. The tests drive both agent workflows through persistence/reporting without waiting for schedules or 30 days, including Tavily credit concurrency and durable response reuse. `npm.cmd run verify` runs type checking, lint, unit tests, and build together; integration tests run separately.
 
 For interactive development use `RESEARCH_CYCLE_DAYS=1`. A nonproduction instance also accepts `{ "simulate": true }` on finalization to close the cycle now after processing completes. Docker runs with `NODE_ENV=production`, where this shortcut is rejected. No simulation bypass exists for pending evidence.
 
@@ -125,6 +171,6 @@ Queue retries use exponential backoff, bounded attempts/concurrency, and stable 
 
 V1 retains completed queue records; add an archive/retention policy before high-volume use. A database run log does not make arbitrary external side effects exactly once. Use one application instance initially. Public HTTP access is restricted, but feed permission and business evidence accuracy remain operator responsibilities.
 
-## Next integration step
+## Next operational step
 
-Select and connect a permitted business discovery/search provider for Delhi NCR, configure real RSS sources, and add OpenAI/Telegram credentials. Validate a small real-data run before enabling `CLIENT_AGENT_ENABLED` and `RESEARCH_AGENT_ENABLED`. Deeper source coverage and semantic analysis are subsequent phases, not simulated features in this build.
+Deploy the Tavily integration, configure the server key and research source, and complete the manual checks above. Then enable the schedules. Follow [TAVILY_DEPLOYMENT.md](docs/TAVILY_DEPLOYMENT.md) for the full deployment, live verification, and short development-cycle procedure.
