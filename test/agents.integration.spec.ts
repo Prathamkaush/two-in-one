@@ -148,4 +148,61 @@ describe('agent happy paths with real PostgreSQL and mocked paid integrations', 
     expect(report.insufficiencyReason).toContain('Insufficient traceable evidence');
     expect((await db.researchCycle.findUniqueOrThrow({ where: { id: cycle.id } })).status).toBe('COMPLETED');
   });
+  it('refreshes an empty day once, prioritizes qualified leads and delivers capped labeled reviews idempotently', async () => {
+    const config = new Settings(new ConfigService({ CLIENT_REGIONS: 'Delhi', CLIENT_CATEGORIES: 'Review fixtures',
+      CLIENT_AGENT_DAILY_LEAD_LIMIT: 2, OPENAI_MODEL_SMALL: 'fixture', TIMEZONE: 'Asia/Kolkata',
+      OPENAI_ENABLED: true, TAVILY_ENABLED: true, CLIENT_REVIEW_ENABLED: true }));
+    const candidates = [0, 1, 2].map((index) => ({ businessName: `Review Fixture ${index}`, category: 'Review fixtures', location: 'Delhi',
+      websiteUrl: null, instagramUrl: `https://instagram.com/review_fixture_${index}`, socialUrls: [],
+      sourceUrl: `https://instagram.com/review_fixture_${index}`, verifiedAt: new Date().toISOString(),
+      facts: [{ claim: `Review Fixture ${index} in Delhi accepts customer enquiries.`, sourceUrl: `https://instagram.com/review_fixture_${index}` }],
+      factors: { noWebsite: index === 0, poorWebsite: false, activeSocial: index === 0, clearOffering: true,
+        recentActivity: index === 0, operatingEvidence: index === 0, weakContact: false, serviceFit: true } }));
+    const discovery = { discover: jest.fn().mockResolvedValue({ businesses: candidates.map((candidate) => ({ candidate,
+      provenance: { provider: 'tavily', query: 'fixture', verificationQuery: 'fixture official website', collectedAt: new Date().toISOString(), sourceUrls: [candidate.sourceUrl] } })),
+      queries: ['fixture'], errors: 0, duplicates: 0, uncertainWebsites: 2, extractedCandidates: 3, rejections: {}, missingRecentActivity: 2, enrichmentFailures: 0 }) };
+    // Use the real outbox with a mocked queue to verify notification deduplication.
+    const outbox = new TelegramService(config, db, queues);
+    const client = new ClientService(db, config, queues, ai, outbox, discovery as unknown as TavilyBusinessSource);
+    jest.spyOn(client, 'today').mockReturnValue('2099-01-01');
+    const empty = await db.clientBatch.create({ data: { date: client.today(), candidates: [], status: 'COMPLETED', discovery: { old: true } } });
+    const triggers = await Promise.all([client.trigger(true), client.trigger(true)]);
+    expect(triggers.map((r) => r.revision)).toEqual([1, 1]);
+    expect((await db.clientBatch.findUniqueOrThrow({ where: { id: empty.id } })).revision).toBe(1);
+    await client.discover(client.today(), 0); expect(discovery.discover).not.toHaveBeenCalled();
+    await client.discover(client.today(), 1);
+    await client.audit(empty.id, 0); // stale stages cannot score a refreshed batch
+    await client.analyze(empty.id, 0);
+    expect(await db.leadAnalysis.count({ where: { batchId: empty.id } })).toBe(0);
+    await client.analyze(empty.id, 1);
+    const selected = await db.clientBatch.findUniqueOrThrow({ where: { id: empty.id } });
+    expect(selected.selected).toHaveLength(1); expect(selected.review).toHaveLength(1);
+    aiMock.generatePitch.mockRejectedValueOnce(new Error('AI budget exhausted'));
+    await client.draftAndReport(empty.id, 1);
+    await client.draftAndReport(empty.id, 1);
+    const notices = await db.notification.findMany({ where: { key: { contains: empty.id } } });
+    expect(notices).toHaveLength(2);
+    const review = notices.find((n) => n.key.startsWith('client-review-'))!;
+    expect(review.text).toContain('MANUAL REVIEW - NOT QUALIFIED');
+    expect(review.text).toContain('UNKNOWN - absence is not confirmed');
+    expect(review.text).toContain('UNVERIFIED'); expect(review.agent).toBe('CLIENT');
+    const report = await db.dailyReport.findUniqueOrThrow({ where: { agent_date: { agent: 'CLIENT', date: client.today() } } });
+    expect(report.content).toMatchObject({ selectedCount: 1, reviewCount: 1, draftFallbacks: 1 });
+    const history = await db.clientBatch.findUniqueOrThrow({ where: { id: empty.id } });
+    expect(history.discovery).toHaveProperty('refreshHistory.previousDiscovery.old', true);
+    await expect(client.trigger(true)).rejects.toThrow('Refresh is allowed once');
+    const presented = await db.businessLead.findMany({ where: { category: 'Review fixtures', presentedAt: { not: null } } });
+    expect(presented.map((l) => l.status).sort()).toEqual(['PRESENTED', 'REVIEW_PRESENTED']);
+    // Contacting a delivered review is preserved by subsequent replay.
+    const reviewLead = presented.find((l) => l.status === 'REVIEW_PRESENTED')!;
+    await db.businessLead.update({ where: { id: reviewLead.id }, data: { status: 'CONTACTED' } });
+    await client.draftAndReport(empty.id, 1);
+    expect((await db.businessLead.findUniqueOrThrow({ where: { id: reviewLead.id } })).status).toBe('CONTACTED');
+    jest.spyOn(client, 'today').mockReturnValue('2099-01-02');
+    discovery.discover.mockResolvedValue({ businesses: [], queries: [], errors: 0, duplicates: 0, uncertainWebsites: 0,
+      extractedCandidates: 0, rejections: {}, missingRecentActivity: 0, enrichmentFailures: 0 });
+    await client.discover(client.today());
+    const next = await db.clientBatch.findUniqueOrThrow({ where: { date: client.today() } });
+    expect(next.candidates).toHaveLength(1); // only the review not previously presented
+  });
 });

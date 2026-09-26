@@ -3,7 +3,7 @@ import { Settings } from '../src/common/config/settings.service';
 import { PrismaService } from '../src/database/prisma.service';
 import { AIService } from '../src/ai/ai.service';
 import { TavilyService } from '../src/tavily/tavily.service';
-import { clientQueries, confirmedNoWebsite, matchesMarketLocation, normalizedProfile, TavilyBusinessSource } from '../src/client-agent/discovery/tavily.source';
+import { clientQueries, confirmedNoWebsite, matchesMarketLocation, normalizedProfile, recentDateSupported, TavilyBusinessSource } from '../src/client-agent/discovery/tavily.source';
 
 describe('Tavily client discovery', () => {
   const profile = 'https://www.instagram.com/fixture_bakery/';
@@ -14,11 +14,11 @@ describe('Tavily client discovery', () => {
     activity: quote(`Taking cake orders ${date}`), activityDate: date, noWebsite: quote('We have no website. Contact us on Instagram.') };
   const result = { url: profile, title: 'Fixture Bakery', content: [business.identity.text, business.offering.text, business.activity.text, business.noWebsite.text].join('\n') };
   const input = { date, regions: ['Delhi'], categories: ['Bakeries'] };
-  function setup(candidate = business) {
-    const api = { search: jest.fn().mockResolvedValue({ results: [result] }) };
+  function setup(candidate = business, extracts = 0) {
+    const api = { search: jest.fn().mockResolvedValue({ results: [result] }), extract: jest.fn().mockResolvedValue({ results: [] }) };
     const ai = { extractStructuredData: jest.fn().mockResolvedValueOnce({ businesses: [candidate] }).mockResolvedValue({ websiteUrl: null, evidence: null }) };
     const db = { businessLead: { findFirst: jest.fn().mockResolvedValue(null) } };
-    const settings = new Settings(new ConfigService({ CLIENT_DISCOVERY_QUERIES: 1, CLIENT_DISCOVERY_CANDIDATES: 3 }));
+    const settings = new Settings(new ConfigService({ CLIENT_DISCOVERY_QUERIES: 1, CLIENT_DISCOVERY_CANDIDATES: 3, CLIENT_ENRICHMENT_EXTRACTS: extracts }));
     return { api, ai, db, adapter: new TavilyBusinessSource(api as unknown as TavilyService, ai as unknown as AIService, settings, db as unknown as PrismaService) };
   }
   it('normalizes a real observed profile and qualifies explicit first-party no-website evidence', async () => {
@@ -143,5 +143,38 @@ describe('Tavily client discovery', () => {
     const result = await adapter.discover(input);
     expect(result.businesses).toHaveLength(1);
     expect(result.businesses[0].candidate.facts[1].claim).toBe('We bake cakes for local customers.');
+  });
+  it('targets website verification with the observed handle, category and locality', async () => {
+    const { adapter, api } = setup({ ...business, location: '418, Rohini, Delhi' });
+    await adapter.discover(input);
+    expect(api.search.mock.calls[1][0]).toContain('"fixture_bakery" Bakeries 418, Rohini, Delhi');
+  });
+  it('retains an unknown candidate when verification or AI enrichment fails', async () => {
+    const { adapter, api, ai } = setup();
+    api.search.mockResolvedValueOnce({ results: [result] }).mockRejectedValue(new Error('budget exhausted'));
+    ai.extractStructuredData.mockReset().mockResolvedValueOnce({ businesses: [business] }).mockRejectedValue(new Error('AI budget exhausted'));
+    const output = await adapter.discover(input);
+    expect(output.businesses).toHaveLength(1);
+    expect(output.businesses[0].candidate.factors.noWebsite).toBe(false);
+    expect(output.enrichmentFailures).toBe(2);
+  });
+  it('selectively extracts a profile, validates its dated quote, and does not assume absence from missing links', async () => {
+    const { adapter, api, ai } = setup(business, 1);
+    const activity = `Taking orders on ${date}`;
+    api.extract.mockResolvedValue({ results: [{ url: profile, raw_content: `Fixture Bakery in Delhi. ${activity}` }] });
+    ai.extractStructuredData.mockReset().mockResolvedValueOnce({ businesses: [{ ...business, activityDate: '', noWebsite: null }] }).mockResolvedValue({
+      websiteUrl: null, evidence: null, activityDate: date, activity: quote(activity), noWebsite: null,
+    });
+    const output = await adapter.discover(input);
+    expect(api.extract).toHaveBeenCalledTimes(1);
+    expect(output.businesses[0].candidate.factors).toMatchObject({ activeSocial: true, noWebsite: false });
+  });
+  it('recognizes actual calendar dates, rejects invented/future/stale dates', () => {
+    const now = new Date('2026-09-26T12:00:00Z');
+    expect(recentDateSupported('2026-09-25', 'Orders opened September 25, 2026', now)).toBe(true);
+    expect(recentDateSupported('2026-09-25', 'Orders opened 25 September 2026', now)).toBe(true);
+    expect(recentDateSupported('2026-09-25', 'DM for orders', now)).toBe(false);
+    expect(recentDateSupported('2026-09-27', '2026-09-27', now)).toBe(false);
+    expect(recentDateSupported('2020-09-25', '2020-09-25', now)).toBe(false);
   });
 });

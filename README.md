@@ -4,7 +4,7 @@ One NestJS application, PostgreSQL/Prisma, Redis/BullMQ, and shared OpenAI/Teleg
 
 ## Current status and server deployment
 
-The Tavily implementation is complete for this MVP. No additional implementation phase is required before deployment and live verification. Automated validation passed 115 unit tests, 11 PostgreSQL/Redis integration tests, TypeScript, lint, and build. External API calls were mocked: these results do not establish real Tavily coverage or Telegram delivery on the server.
+The MVP supports qualified leads and a separate manual-review list, targeted Tavily verification, and a bounded same-day refresh of an empty client batch. Automated validation passed 119 unit tests, 12 PostgreSQL/Redis integration tests, TypeScript, lint, and build. External API calls were mocked: these results do not guarantee real Tavily coverage or Telegram delivery on the server.
 
 Run deployment commands in the VPS terminal, not in Telegram:
 
@@ -32,17 +32,19 @@ Complete these checks before enabling unattended client runs. All `/admin/*` end
 | Tavily connectivity | `POST /admin/tavily/test` | Successful response; inspect `GET /admin/tavily/status` for usage/errors |
 | Client pipeline | `POST /admin/client/run` | Batch reaches `COMPLETED` in `GET /admin/client/batches`; inspect evidence and drafts in `GET /admin/client/leads` |
 | Same-day discovery preview | `POST /admin/client/discovery-preview` | Inspect candidates and rejection reasons even after today's batch completed; cached requests are reused, new requests use API budgets; no leads or Telegram messages are created |
+| Empty-batch refresh | `POST /admin/client/run` with `{"refresh":true}` | One refresh of an empty completed batch; revision increases to 1, original discovery summary is retained, and existing deliveries cannot be reset |
 | Research source | `POST /admin/research/sources` with `adapter: "tavily"` | Source appears in `GET /admin/research/sources`; existing RSS sources remain |
 | Research collection | Inspect `GET /admin/research/cycles`, start a cycle only if none is active, then `POST /admin/research/collect` | Items appear in `GET /admin/research/cycles/<cycle-id>/items` and finish processing |
 | Reports and delivery | `POST /admin/research/summary`; inspect `GET /admin/reports/daily` | Actual messages arrive through the appropriate Telegram bot |
 
-A returned job or notification ID means queued, not finished or delivered. Inspect `GET /admin/queues` for failures. Client runs reuse one batch per local day, so repeating the run endpoint does not restart completed discovery or send extra leads. Research collection reuses the current configured batch interval.
+A returned job or notification ID means queued, not finished or delivered. Inspect `GET /admin/queues` for failures. Client runs reuse one batch per local day; only the explicit, once-per-day empty-batch refresh restarts completed discovery. Research collection reuses the current configured batch interval. This update adds manual-review statuses and batch revision fields: run the migration before starting the rebuilt app.
 
 Once live evidence and Telegram delivery are verified, set `CLIENT_AGENT_ENABLED=true` and, if desired, `RESEARCH_AGENT_ENABLED=true`, then recreate `app`. Scheduling follows the configured times and timezone; enabling a flag does not immediately trigger work. Tavily being enabled alone does not create a research source or start a research cycle.
 
 ### MVP boundaries and later phases
 
 - Automated client qualification prioritizes explicit, evidence-backed **no-website** opportunities. Missing search results remain `UNKNOWN`. A day can produce fewer than six leads or none; quality thresholds are not lowered to fill the quota.
+- With `CLIENT_REVIEW_ENABLED=true` (default), unused places can contain identity-backed **MANUAL REVIEW - NOT QUALIFIED** candidates with unknown website/activity status. Qualified leads and reviews share the daily limit; both are deduplicated across days. Review drafts are neutral templates for use only after your verification. `selectedCount` and `reviewCount` are reported separately.
 - Automated weak/outdated-website detection is a later enhancement. Existing HTTP checks do not establish website quality; operator-verified weak-website candidates remain supported.
 - Research sends operational summaries during the cycle. Business opportunities are generated only after cycle closure, with fewer results when evidence is insufficient.
 - Deeper competitor research, semantic clustering, additional sources, a dashboard, and cross-cycle comparison are later enhancements, not prerequisites for running this MVP.
@@ -136,6 +138,8 @@ Monthly synthesis receives at most 60 items and a bounded 36 KB evidence represe
 Start with `.env.example`. Required foundation values: `DATABASE_URL`, `REDIS_HOST`, `REDIS_PORT`, `ADMIN_API_KEY`, `TIMEZONE`. Compose also requires `POSTGRES_PASSWORD`. For deployment, replace the local database password and keep its URL representation correctly encoded.
 
 For Tavily set `TAVILY_ENABLED=true` and `TAVILY_API_KEY`. Search results, request timeouts, retries, searches per batch, candidate verification, and research Extract calls are bounded by the settings in `.env.example`. Both agents share `TAVILY_DAILY_CREDIT_LIMIT` and `TAVILY_MONTHLY_CREDIT_LIMIT`, independently of OpenAI's dollar budgets. Each HTTP attempt reserves credits before sending; failed or ambiguous attempts retain conservative reservations, and successful responses are cached for retries. `GET /admin/tavily/status` reports recent activity without exposing the key. See the [deployment guide](docs/TAVILY_DEPLOYMENT.md#qualification-and-cost-limits) for accounting details.
+
+Client website verification includes the observed social handle, category and locality. `CLIENT_ENRICHMENT_EXTRACTS=2` limits selective profile extraction. Failed verification leaves uncertainty explicit and can fall back to manual review; it never establishes website absence. Check `enrichmentFailures` alongside discovery errors. Set `CLIENT_REVIEW_ENABLED=false` to deliver qualified leads only.
 
 For OpenAI set `OPENAI_ENABLED=true`, `OPENAI_API_KEY`, `OPENAI_MODEL_SMALL`, `OPENAI_MODEL_STRONG`, and `OPENAI_MODEL_PRICES`. Prices are explicit USD per million tokens, for example the **shape only**: `{"your-model":{"input":1,"output":4}}`. Choose current supported models and supply their actual rates; this example is not a pricing claim. Configure daily/monthly limits and output limits. Final synthesis has a separate 12,000-token default cap.
 

@@ -15,6 +15,8 @@ enum Agent {
 
 enum LeadStatus {
   DISCOVERED
+  NEEDS_REVIEW
+  REVIEW_PRESENTED
   ANALYZED
   QUALIFIED
   PRESENTED
@@ -101,6 +103,8 @@ model ClientBatch {
   candidates Json
   discovery  Json     @default("{}")
   selected   Json     @default("[]")
+  review     Json     @default("[]")
+  revision   Int      @default(0)
   status     String   @default("DISCOVERED")
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt

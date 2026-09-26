@@ -12,6 +12,7 @@ export interface DiscoveryResult {
   extractedCandidates: number;
   rejections: Record<string, number>;
   missingRecentActivity: number;
+  enrichmentFailures: number;
 }
 export interface BusinessDiscoverySource {
   readonly name: string;

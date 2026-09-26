@@ -10,7 +10,11 @@ export class ClientController {
   @Get('configuration') configuration() { return this.client.configuration(); }
   @Put('configuration') configure(@Body() body: unknown) { return this.client.configure(body); }
   @Post('candidates') ingest(@Body() body: unknown) { return this.client.ingest(body); }
-  @Post('run') run() { return this.client.trigger(); }
+  @Post('run') run(@Body() body: unknown) {
+    const parsed = z.object({ refresh: z.boolean().default(false) }).strict().safeParse(body ?? {});
+    if (!parsed.success) throw new BadRequestException('Expected optional refresh boolean');
+    return this.client.trigger(parsed.data.refresh);
+  }
   @Post('discovery-preview') preview() { return this.client.previewDiscovery(); }
   @Get('batches') batches() { return this.db.clientBatch.findMany({ take: 30, orderBy: { createdAt: 'desc' } }); }
   @Get('batches/:id') batch(@Param('id') id: string) { return this.db.clientBatch.findUniqueOrThrow({ where: { id } }); }

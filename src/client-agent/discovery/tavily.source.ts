@@ -15,7 +15,8 @@ export const discoverySchema = z.object({ businesses: z.array(z.object({
   identity: quote, offering: quote, activity: quote,
   noWebsite: quote.nullable(), activityDate: z.string().nullable(),
 })) });
-const websiteSchema = z.object({ websiteUrl: z.string().nullable(), evidence: quote.nullable() });
+const websiteSchema = z.object({ websiteUrl: z.string().nullable(), evidence: quote.nullable(),
+  activityDate: z.string().nullable(), activity: quote.nullable(), noWebsite: quote.nullable() });
 export const normalizedProfile = (url: string) => {
   const parsed = publicUrl(url); parsed.search = ''; parsed.hash = '';
   parsed.hostname = parsed.hostname.replace(/^www\./, '').toLowerCase();
@@ -26,7 +27,7 @@ export function isSocialProfile(url: string) {
   try {
     const u = new URL(normalizedProfile(url)), parts = u.pathname.split('/').filter(Boolean);
     return ['instagram.com', 'facebook.com', 'linkedin.com', 'youtube.com'].includes(u.hostname) && parts.length > 0 &&
-      !['p', 'reel', 'reels', 'stories', 'explore', 'share', 'watch', 'search'].includes(parts[0]);
+      !['p', 'reel', 'reels', 'stories', 'explore', 'share', 'watch', 'search', 'popular', 'directory', 'accounts', 'tags'].includes(parts[0]);
   } catch { return false; }
 }
 export function clientQueries(date: string, regions: string[], categories: string[], count: number) {
@@ -109,9 +110,9 @@ export class TavilyBusinessSource implements BusinessDiscoverySource {
     private readonly settings: Settings, private readonly db: PrismaService) {}
   async discover(input: { date: string; regions: string[]; categories: string[] }): Promise<DiscoveryResult> {
     const output: DiscoveryResult = { businesses: [], queries: [], errors: 0, duplicates: 0, uncertainWebsites: 0,
-      extractedCandidates: 0, rejections: {}, missingRecentActivity: 0 };
+      extractedCandidates: 0, rejections: {}, missingRecentActivity: 0, enrichmentFailures: 0 };
     const reject = (reason: string) => { output.rejections[reason] = (output.rejections[reason] ?? 0) + 1; };
-    const seen = new Set<string>(); let examined = 0;
+    const seen = new Set<string>(); let examined = 0, extracts = 0;
     for (const plan of clientQueries(input.date, input.regions, input.categories, this.settings.get('CLIENT_DISCOVERY_QUERIES'))) {
       if (examined >= this.settings.get('CLIENT_DISCOVERY_CANDIDATES')) break;
       output.queries.push(plan.query);
@@ -157,26 +158,46 @@ export class TavilyBusinessSource implements BusinessDiscoverySource {
             { businessName: { equals: business.businessName.trim(), mode: 'insensitive' }, location: { equals: plan.location, mode: 'insensitive' } },
           ] }, select: { id: true } })) { output.duplicates++; continue; }
           seen.add(profile);
-          const verificationQuery = `"${business.businessName}" ${plan.location} official website`.slice(0, 500);
+          // Include the observed handle/category/locality to disambiguate short names such as Angls.
+          const handle = new URL(profile).pathname.split('/').filter(Boolean).at(-1) ?? '';
+          const verificationQuery = `"${business.businessName}" "${handle}" ${plan.category} ${business.location} official website contact`.slice(0, 500);
           output.queries.push(verificationQuery);
-          const verification = await this.tavily.search(verificationQuery, { agent: 'CLIENT', key: `${key}-verify-${profile}` });
+          let verification: { results: SearchResult[] } = { results: [] };
+          let verificationSucceeded = false;
+          try {
+            verification = await this.tavily.search(verificationQuery, { agent: 'CLIENT', key: `${key}-verify-${profile}` });
+            verificationSucceeded = true;
+          } catch { output.enrichmentFailures++; }
           const combined = [...candidateEvidence, ...verification.results.map((r) => ({ ...r, content: r.content.slice(0, 2000) }))];
-          const detected = await this.ai.extractStructuredData({ agent: 'CLIENT', job: input.date, requestKey: `website-${createHash('sha256').update(key + profile).digest('hex')}` },
-            'Identify the dedicated official website of this exact business, matching business name and location. Return a URL only if present in source URLs/text and a verbatim quote establishes the association. Exclude social profiles and directory pages. If uncertain use null; absence never establishes no website.',
-            { businessName: business.businessName, location: plan.location, results: combined }, websiteSchema);
+          if (extracts < (this.settings.get('CLIENT_ENRICHMENT_EXTRACTS') ?? 0)) {
+            extracts++;
+            try {
+              const page = await this.tavily.extract(profileUrl, { agent: 'CLIENT', key: `${key}-profile-extract-${profile}` });
+              const match = page.results.find((r) => sameSource(r.url, profileUrl));
+              if (match?.raw_content) combined.push({ url: profileUrl, title: business.businessName, content: match.raw_content.slice(0, 6000) });
+              else output.enrichmentFailures++;
+            } catch { output.enrichmentFailures++; /* Keep the usable snippet candidate for manual review. */ }
+          }
+          let detected: z.infer<typeof websiteSchema> = { websiteUrl: null, evidence: null, activityDate: null, activity: null, noWebsite: null };
+          try {
+            detected = await this.ai.extractStructuredData({ agent: 'CLIENT', job: input.date, requestKey: `website-v2-${createHash('sha256').update(key + profile).digest('hex')}` },
+              'Identify the dedicated official website of this exact business, matching business name, social handle and location. Return a URL only if observed and a verbatim quote establishes the association. Exclude unrelated names, social profiles and directories. Also copy first-party dated activity and an explicit no-website statement if present. activityDate must be an ISO date supported by the quoted calendar date. Use null for unknown fields. Missing links never establish no website. Do not assume a contact invitation proves current activity.',
+              { businessName: business.businessName, location: plan.location, results: combined }, websiteSchema);
+          } catch { output.enrichmentFailures++; verificationSucceeded = false; }
           const websiteUrl = detected.websiteUrl && detected.evidence && grounded(detected.evidence, combined) &&
             detected.evidence.text.toLowerCase().includes(business.businessName.toLowerCase()) &&
             detected.evidence.text.toLowerCase().includes(plan.location.toLowerCase()) &&
             observedUrl(detected.websiteUrl, combined) && dedicatedWebsite(detected.websiteUrl) ? detected.websiteUrl : null;
-          const noWebsite = !detected.websiteUrl && !websiteUrl && confirmedNoWebsite(business.noWebsite, profileUrl, candidateEvidence);
-          const activityDate = business.activityDate ? Date.parse(business.activityDate) : NaN;
-          const activityGrounded = grounded(business.activity, evidence);
-          const recent = activityGrounded && Number.isFinite(activityDate) && activityDate <= Date.now() && Date.now() - activityDate <= 30 * 86400000 &&
-            business.activity.text.includes(business.activityDate!) && normalizedProfile(business.activity.sourceUrl) === profile;
+          const noWebsiteQuote = detected.noWebsite && confirmedNoWebsite(detected.noWebsite, profileUrl, combined) ? detected.noWebsite : business.noWebsite;
+          const noWebsite = verificationSucceeded && !detected.websiteUrl && !websiteUrl && confirmedNoWebsite(noWebsiteQuote, profileUrl, combined);
+          const activity = detected.activity && grounded(detected.activity, combined) ? detected.activity : business.activity;
+          const activityDate = activity === detected.activity ? detected.activityDate : business.activityDate;
+          const activityGrounded = grounded(activity, combined);
+          const recent = activityGrounded && recentDateSupported(activityDate, activity.text) && sameSource(activity.sourceUrl, profile);
           const parsed = candidateSchema.safeParse({ businessName: business.businessName.trim(), location: plan.location, category: plan.category,
             websiteUrl, instagramUrl: new URL(profile).hostname === 'instagram.com' ? profile : null, socialUrls: [profile],
             sourceUrl: business.identity.sourceUrl, verifiedAt: new Date().toISOString(),
-            facts: [business.identity, business.offering, ...(activityGrounded ? [business.activity] : []), ...(noWebsite && business.noWebsite ? [business.noWebsite] : []),
+            facts: [business.identity, business.offering, ...(activityGrounded ? [activity] : []), ...(noWebsite && noWebsiteQuote ? [noWebsiteQuote] : []),
               ...(websiteUrl && detected.evidence ? [detected.evidence] : [])].map((q) => ({ claim: quoteText(q.text), sourceUrl: q.sourceUrl })),
             factors: { noWebsite, poorWebsite: false, activeSocial: recent, clearOffering: true, recentActivity: recent,
               operatingEvidence: recent, weakContact: false, serviceFit: true } });
@@ -190,4 +211,15 @@ export class TavilyBusinessSource implements BusinessDiscoverySource {
     }
     return output;
   }
+}
+export function recentDateSupported(iso: string | null | undefined, quote: string, now = new Date()) {
+  if (!iso || !/^\d{4}-\d{2}-\d{2}$/.test(iso)) return false;
+  const date = new Date(`${iso}T00:00:00Z`);
+  if (!Number.isFinite(date.getTime()) || date.toISOString().slice(0, 10) !== iso || date > now || now.getTime() - date.getTime() > 30 * 86400000) return false;
+  const clean = (value: string) => value.toLowerCase().replace(/[,]/g, '').replace(/\s+/g, ' ').trim();
+  const variants = [iso];
+  for (const locale of ['en-US', 'en-GB']) for (const month of ['long', 'short'] as const) {
+    variants.push(date.toLocaleDateString(locale, { day: 'numeric', month, year: 'numeric', timeZone: 'UTC' }));
+  }
+  return variants.some((value) => clean(quote).includes(clean(value)));
 }

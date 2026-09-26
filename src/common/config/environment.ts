@@ -36,6 +36,8 @@ export const environmentSchema = z.object({
   TAVILY_REQUESTS_PER_MINUTE: z.coerce.number().int().min(1).max(100).default(20),
   CLIENT_DISCOVERY_QUERIES: z.coerce.number().int().min(1).max(10).default(3),
   CLIENT_DISCOVERY_CANDIDATES: z.coerce.number().int().min(1).max(20).default(8),
+  CLIENT_REVIEW_ENABLED: bool.default('true'),
+  CLIENT_ENRICHMENT_EXTRACTS: z.coerce.number().int().min(0).max(5).default(2),
   RESEARCH_TAVILY_QUERIES: z.coerce.number().int().min(1).max(5).default(1),
   RESEARCH_TAVILY_EXTRACTS: z.coerce.number().int().min(0).max(5).default(1),
   OPENAI_API_KEY: optionalSecret,

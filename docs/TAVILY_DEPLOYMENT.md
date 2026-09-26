@@ -27,6 +27,8 @@ TAVILY_MONTHLY_CREDIT_LIMIT=900
 TAVILY_REQUESTS_PER_MINUTE=20
 CLIENT_DISCOVERY_QUERIES=3
 CLIENT_DISCOVERY_CANDIDATES=8
+CLIENT_REVIEW_ENABLED=true
+CLIENT_ENRICHMENT_EXTRACTS=2
 RESEARCH_TAVILY_QUERIES=1
 RESEARCH_TAVILY_EXTRACTS=1
 CLIENT_AGENT_ENABLED=false
@@ -46,7 +48,9 @@ curl -sS http://127.0.0.1:3010/health/ready
 ```
 
 Wait for application startup if the first health request is too early. The migration
-adds `TavilyRequest` and a discovery summary field; it does not delete existing data.
+adds `TavilyRequest`, discovery summaries, manual-review lead statuses and batch
+revision/review fields; it does not delete existing data. Run migrations before the
+new application starts; rebuilding only `app` is not enough for this update.
 If Compose overrides an environment variable under `app.environment`, that value
 takes precedence over `.env`. Check only nonsecret settings when diagnosing this.
 
@@ -75,10 +79,56 @@ api admin/reports/daily
 The run response means queued, not completed. Poll `admin/queues` and the batch list
 until the batch is `COMPLETED`. The batch's `discovery` field gives queries, errors,
 duplicates and uncertain website counts. Lead records contain sources, evidence,
-scores and drafts. Telegram receives qualified leads or an honest empty report.
+scores and drafts. Telegram receives qualified leads, clearly labeled manual-review
+candidates, or an honest empty report.
 `/client_today` in Telegram displays the stored daily report. There is one batch per
 local day: repeated `/admin/client/run` calls reuse it and do not send additional
-leads or restart a completed day's discovery.
+leads or restart a completed day's discovery by default.
+
+### Start today after a previously empty run
+
+If today's batch is already `COMPLETED` with empty `candidates`, `selected`, and
+`review`, the following allows **one** bounded refresh:
+
+```bash
+api admin/client/run -X POST -H 'Content-Type: application/json' -d '{"refresh":true}'
+api admin/client/batches
+api admin/queues
+```
+
+The refreshed batch has `revision: 1`. Its previous discovery summary remains in
+`discovery.refreshHistory`. Repeated requests while that revision is in progress
+reuse the same job; a second refresh after completion is rejected. Batches with
+existing candidates/deliveries cannot be refreshed. Old stage jobs cannot process a
+new revision. No database rows or queue records need to be deleted.
+
+`CLIENT_REVIEW_ENABLED=true` (default) fills unused places in the daily limit with
+recently collected, identity-backed candidates that have a social profile, a clear
+offering, and no verified website URL. This is **not** a claim of no website or recent
+activity. Qualified leads take priority; qualified and review candidates together
+never exceed the configured daily limit. Set the flag to false for qualified-only
+delivery.
+
+Review messages say **MANUAL REVIEW - NOT QUALIFIED**, show observed facts and source
+links, and mark website/activity uncertainty. Check recent posts, bio links, identity
+and website presence before using the optional neutral draft. These drafts use a
+template and do not spend AI credits or assert that a website is missing. Presented
+reviews have status `REVIEW_PRESENTED`, retain their evidence and draft, and are not
+sent again on later days. Use the existing lead PATCH endpoint to record CONTACTED
+or REJECTED after manual review. Daily reports separate `selectedCount` from
+`reviewCount`; batch `selected` and `review` arrays are also separate.
+
+Targeted verification includes the observed profile handle, category and locality.
+`CLIENT_ENRICHMENT_EXTRACTS` caps selective profile extraction per discovery run.
+Verification/extraction failures increment `enrichmentFailures`; supported identity
+evidence can still be sent for manual review. A failed verification never confirms
+website absence. Tavily and OpenAI budget caps continue to apply, including previews.
+If AI pitch generation is unavailable, qualified leads receive a neutral template
+instead of blocking the remaining report. The fallback is recorded in `SystemError`,
+the draft's `model` field, and the daily report's `draftFallbacks` count. It does not
+retry a paid AI call under a new key or claim facts absent from the evidence.
+
+### Inspect discovery and continue research
 
 New client batches also report `extractedCandidates`, `rejections` (counts by reason),
 and `missingRecentActivity`. API `errors: 0` only means no caught request/processing
@@ -87,8 +137,8 @@ Matching accepts equivalent Instagram profile URLs, quotes in returned titles or
 snippets, and explicit city labels such as `Delhi, India` or `New Delhi`. A general
 `Delhi NCR` label remains ambiguous for an individual city. Unknown activity dates
 remain unknown, and missing website results still do not establish no website.
-Deploying matching fixes does not modify historical batches or restart a completed
-day. To inspect the current matching immediately, including after today's batch has
+Deploying matching fixes does not automatically modify historical batches. To inspect
+the current matching immediately, including after today's batch has
 completed, use the protected preview:
 
 ```bash

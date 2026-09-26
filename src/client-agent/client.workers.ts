@@ -12,9 +12,10 @@ function clientWorker(queue: string, method: 'discover' | 'audit' | 'analyze' | 
     async process(job: Job) {
       try {
         return await this.executions.execute(queue, 'CLIENT', job, async () => {
+          const revision = z.object({ revision: z.number().int().nonnegative().default(0) }).parse(job.data).revision;
           const value = method === 'discover' ? z.object({ date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/) }).parse(job.data).date
             : z.object({ batchId: z.string().min(1) }).parse(job.data).batchId;
-          await this.client[method](value);
+          await this.client[method](value, revision);
         });
       } catch (error) {
         if (job.attemptsMade + 1 >= (job.opts.attempts ?? 1)) {
