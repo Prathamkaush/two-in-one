@@ -12,7 +12,7 @@ describe('separate Telegram bots', () => {
   function setup(agent: Agent = 'CLIENT') {
     const settings = new Settings(new ConfigService({ TELEGRAM_ENABLED: true, CLIENT_TELEGRAM_BOT_TOKEN: '1:client', RESEARCH_TELEGRAM_BOT_TOKEN: '2:research',
       CLIENT_TELEGRAM_CHAT_ID: '42', RESEARCH_TELEGRAM_CHAT_ID: '43', CLIENT_TELEGRAM_WEBHOOK_SECRET: 'c'.repeat(32), RESEARCH_TELEGRAM_WEBHOOK_SECRET: 'r'.repeat(32), TIMEZONE: 'UTC', HTTP_TIMEOUT_MS: 1000 }));
-    const db = { notification: { findUniqueOrThrow: jest.fn().mockResolvedValue({ agent, text: 'test', sentAt: null }), update: jest.fn(),
+    const db = { businessLead: { findMany: jest.fn().mockResolvedValue([]) }, notification: { findUniqueOrThrow: jest.fn().mockResolvedValue({ agent, text: 'test', sentAt: null }), update: jest.fn(),
       upsert: jest.fn().mockImplementation(async ({ create }: { create: { key: string } }) => ({ ...create, id: create.key, sentAt: null })) } };
     const queues = { enqueue: jest.fn() };
     const service = new TelegramService(settings, db as unknown as PrismaService, queues as unknown as QueueService);
@@ -43,5 +43,26 @@ describe('separate Telegram bots', () => {
     await expect(controller.webhook('c'.repeat(32), {})).rejects.toThrow();
     await controller.agentWebhook('client', 'c'.repeat(32), { update_id: 1, message: { text: '/status', chat: { id: 43 } } });
     expect(notify).not.toHaveBeenCalled();
+  });
+  it('retrieves only pending presented reviews and sends saved cards through the receiving bot', async () => {
+    const { controller, service, db } = setup();
+    db.businessLead.findMany.mockResolvedValue([{ id: 'lead1', businessName: 'Bakery', category: 'Bakeries', location: 'Delhi',
+      instagramUrl: 'https://instagram.com/fixture', websiteUrl: null, sources: [{ evidence: { facts: [{ claim: 'Cakes on order' }] } }],
+      drafts: [{ content: 'Hello Bakery' }] }]);
+    const notify = jest.spyOn(service, 'notify').mockResolvedValue('id');
+    await controller.agentWebhook('client', 'c'.repeat(32), { update_id: 5, message: { text: '/client_reviews', chat: { id: 42 } } });
+    expect(db.businessLead.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { status: 'REVIEW_PRESENTED' }, take: 7, skip: 0 }));
+    expect(notify).toHaveBeenCalledWith('command-CLIENT-5-review-lead1', expect.stringContaining('https://instagram.com/fixture'), 'CLIENT');
+    expect(notify.mock.calls[0][1]).toContain('UNKNOWN - not confirmed absent');
+    expect(notify.mock.calls[0][1]).toContain('Hello Bakery');
+  });
+  it('explains empty pending reviews and ignores unauthorized review requests', async () => {
+    const { controller, service, db } = setup();
+    const notify = jest.spyOn(service, 'notify').mockResolvedValue('id');
+    await controller.agentWebhook('client', 'c'.repeat(32), { update_id: 6, message: { text: '/client_reviews', chat: { id: 99 } } });
+    expect(db.businessLead.findMany).not.toHaveBeenCalled();
+    await controller.agentWebhook('client', 'c'.repeat(32), { update_id: 7, message: { text: '/client_reviews 2', chat: { id: 42 } } });
+    expect(db.businessLead.findMany).toHaveBeenCalledWith(expect.objectContaining({ skip: 6 }));
+    expect(notify).toHaveBeenCalledWith('command-CLIENT-7', expect.stringContaining('No pending review cards'), 'CLIENT');
   });
 });

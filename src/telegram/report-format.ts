@@ -19,7 +19,7 @@ export function formatDailyReport(agent: string, date: string, value: unknown) {
       `Recent activity unverified: ${count(discovery.missingRecentActivity)}`,
       `Discovery errors: ${count(discovery.errors)}`,
       `Verification steps failed: ${count(discovery.enrichmentFailures)}`, '',
-      count(report.reviewCount) ? 'Next: open the separate review cards and check bio links, website and recent posts before contacting anyone.' :
+      count(report.reviewCount) ? 'Next: send /client_reviews for pending cards. Check bio links, website and recent posts before contacting anyone. Counts above reflect the original run; rejected/contacted cards are excluded.' :
         count(report.selectedCount) ? 'Next: review the lead cards and outreach drafts before sending.' : 'No leads ready today. Check discovery results before another run.',
       'Unknown website does not mean no website. No businesses were contacted.',
     ].join('\n');
