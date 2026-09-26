@@ -88,7 +88,26 @@ snippets, and explicit city labels such as `Delhi, India` or `New Delhi`. A gene
 `Delhi NCR` label remains ambiguous for an individual city. Unknown activity dates
 remain unknown, and missing website results still do not establish no website.
 Deploying matching fixes does not modify historical batches or restart a completed
-day. Inspect a new daily batch to evaluate the changed matching and rejection counts.
+day. To inspect the current matching immediately, including after today's batch has
+completed, use the protected preview:
+
+```bash
+api admin/client/discovery-preview -X POST
+```
+
+Preview uses today's query rotation and reuses cached Search/AI responses. New profile
+resolution or website checks may incur bounded API usage under the existing limits.
+It returns candidate evidence and rejection counts without creating a batch, saving
+leads, creating drafts, or sending Telegram messages. Returned candidates are not
+automatically qualified leads. Missing activity or website evidence remains unknown.
+
+Explicit addresses such as `418, Rohini, Delhi` and `Hari Nagar, Delhi 110064` can
+match Delhi; ambiguous NCR-only labels and conflicting cities cannot. An observed
+Instagram reel may trigger one additional profile search per examined candidate,
+bounded by `CLIENT_DISCOVERY_CANDIDATES`. A profile is accepted only when an actual
+returned profile URL corroborates the business name and city without multiple matches.
+Reel IDs and hashtags are never converted into invented profile URLs. Resolving a
+profile does not by itself prove recent activity or no-website status.
 
 Create a Tavily research source **once**; existing RSS/operator sources remain:
 

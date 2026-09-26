@@ -3,7 +3,7 @@ import { Settings } from '../src/common/config/settings.service';
 import { PrismaService } from '../src/database/prisma.service';
 import { AIService } from '../src/ai/ai.service';
 import { TavilyService } from '../src/tavily/tavily.service';
-import { clientQueries, confirmedNoWebsite, normalizedProfile, TavilyBusinessSource } from '../src/client-agent/discovery/tavily.source';
+import { clientQueries, confirmedNoWebsite, matchesMarketLocation, normalizedProfile, TavilyBusinessSource } from '../src/client-agent/discovery/tavily.source';
 
 describe('Tavily client discovery', () => {
   const profile = 'https://www.instagram.com/fixture_bakery/';
@@ -100,5 +100,48 @@ describe('Tavily client discovery', () => {
       identity: { ...business.identity, sourceUrl: 'https://example.com/business?id=other' } }] });
     api.search.mockResolvedValue({ results: [result, { ...result, url: 'https://example.com/business?id=fixture' }] });
     expect((await adapter.discover(input)).rejections).toEqual({ unsupported_identity_or_offering_quote: 1 });
+  });
+  it.each(['418, Rohini, Delhi', 'Hari Nagar, Delhi 110064', 'New Delhi India', 'Delhi (Pitampura / Shalimar Bagh / Prashant Vihar)'])('matches explicit Delhi addresses: %s', (address) => {
+    expect(matchesMarketLocation(address, 'Delhi', ['Delhi', 'Noida', 'Gurugram'])).toBe(true);
+  });
+  it.each(['Delhi NCR', 'Noida, Delhi NCR', 'Near Delhi', 'Delhi / Noida', 'Rohini', 'Mumbai'])('does not infer Delhi from ambiguous/outside labels: %s', (address) => {
+    expect(matchesMarketLocation(address, 'Delhi', ['Delhi', 'Noida', 'Gurugram'])).toBe(false);
+  });
+  it('does not merge Greater Noida with Noida', () => {
+    expect(matchesMarketLocation('Greater Noida, India', 'Noida', ['Noida'])).toBe(false);
+  });
+  it('resolves a reel to a returned profile with corroborating name/location without claiming recent activity', async () => {
+    const reel = 'https://instagram.com/reel/ObservedID';
+    const { adapter, api, ai } = setup();
+    const q = (text: string) => ({ text, sourceUrl: reel });
+    ai.extractStructuredData.mockReset().mockResolvedValueOnce({ businesses: [{ ...business, profileUrl: reel,
+      location: 'Hari Nagar, Delhi 110064', identity: q('Fixture Bakery in Delhi'), offering: q('We bake cakes for local customers.'),
+      activity: q(`Taking cake orders ${date}`), noWebsite: null,
+    }] }).mockResolvedValue({ websiteUrl: null, evidence: null });
+    api.search.mockResolvedValueOnce({ results: [{ ...result, url: reel }] }).mockResolvedValueOnce({ results: [result] }).mockResolvedValue({ results: [] });
+    const output = await adapter.discover(input);
+    expect(output.businesses).toHaveLength(1);
+    expect(output.businesses[0].candidate.instagramUrl).toBe('https://instagram.com/fixture_bakery');
+    expect(output.businesses[0].candidate.factors.activeSocial).toBe(false);
+    expect(output.queries).toHaveLength(3);
+    expect(api.search).toHaveBeenCalledTimes(3);
+  });
+  it('does not invent a profile URL when reel resolution returns no profile', async () => {
+    const reel = 'https://instagram.com/reel/ObservedID';
+    const { adapter, api, ai } = setup();
+    ai.extractStructuredData.mockReset().mockResolvedValueOnce({ businesses: [{ ...business, profileUrl: reel,
+      identity: { ...business.identity, sourceUrl: reel }, offering: { ...business.offering, sourceUrl: reel },
+    }] });
+    api.search.mockResolvedValueOnce({ results: [{ ...result, url: reel }] }).mockResolvedValueOnce({ results: [] });
+    const output = await adapter.discover(input);
+    expect(output.businesses).toHaveLength(0);
+    expect(output.rejections).toEqual({ profile_resolution_unconfirmed: 1 });
+    expect(api.search).toHaveBeenCalledTimes(2);
+  });
+  it('accepts a truncated offering only when the retained quote occurs verbatim', async () => {
+    const { adapter } = setup({ ...business, location: '418, Rohini, Delhi', offering: { ...business.offering, text: 'We bake cakes for local customers. …' } });
+    const result = await adapter.discover(input);
+    expect(result.businesses).toHaveLength(1);
+    expect(result.businesses[0].candidate.facts[1].claim).toBe('We bake cakes for local customers.');
   });
 });

@@ -4,7 +4,7 @@ One NestJS application, PostgreSQL/Prisma, Redis/BullMQ, and shared OpenAI/Teleg
 
 ## Current status and server deployment
 
-The Tavily implementation is complete for this MVP. No additional implementation phase is required before deployment and live verification. Automated validation passed 99 unit tests, 11 PostgreSQL/Redis integration tests, TypeScript, lint, and build. External API calls were mocked: these results do not establish real Tavily coverage or Telegram delivery on the server.
+The Tavily implementation is complete for this MVP. No additional implementation phase is required before deployment and live verification. Automated validation passed 115 unit tests, 11 PostgreSQL/Redis integration tests, TypeScript, lint, and build. External API calls were mocked: these results do not establish real Tavily coverage or Telegram delivery on the server.
 
 Run deployment commands in the VPS terminal, not in Telegram:
 
@@ -31,6 +31,7 @@ Complete these checks before enabling unattended client runs. All `/admin/*` end
 | --- | --- | --- |
 | Tavily connectivity | `POST /admin/tavily/test` | Successful response; inspect `GET /admin/tavily/status` for usage/errors |
 | Client pipeline | `POST /admin/client/run` | Batch reaches `COMPLETED` in `GET /admin/client/batches`; inspect evidence and drafts in `GET /admin/client/leads` |
+| Same-day discovery preview | `POST /admin/client/discovery-preview` | Inspect candidates and rejection reasons even after today's batch completed; cached requests are reused, new requests use API budgets; no leads or Telegram messages are created |
 | Research source | `POST /admin/research/sources` with `adapter: "tavily"` | Source appears in `GET /admin/research/sources`; existing RSS sources remain |
 | Research collection | Inspect `GET /admin/research/cycles`, start a cycle only if none is active, then `POST /admin/research/collect` | Items appear in `GET /admin/research/cycles/<cycle-id>/items` and finish processing |
 | Reports and delivery | `POST /admin/research/summary`; inspect `GET /admin/reports/daily` | Actual messages arrive through the appropriate Telegram bot |

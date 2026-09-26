@@ -56,6 +56,15 @@ export class ClientService {
     }, { maxWait: 15000, timeout: 15000 });
   }
   today() { return localClock(new Date(), this.settings.get('TIMEZONE')).date; }
+  async previewDiscovery() {
+    if (!this.settings.get('TAVILY_ENABLED') || !this.discovery || !this.settings.get('OPENAI_ENABLED')) {
+      throw new ServiceUnavailableException('Configure Tavily and OpenAI before previewing discovery');
+    }
+    const config = await this.configuration();
+    const result = await this.discovery.discover({ date: this.today(), regions: config.regions, categories: config.categories });
+    return { mode: 'preview', date: this.today(), ...result,
+      note: 'Uses API budgets and cached requests. Does not create a batch, persist leads, generate drafts, or send Telegram messages. Candidates are not qualified leads.' };
+  }
   async trigger() {
     if (!this.settings.get('OPENAI_ENABLED')) throw new ServiceUnavailableException('Configure OpenAI before running outreach generation');
     return { jobId: await this.queues.enqueue('lead-discovery', 'discover', this.today(), { date: this.today() }) };

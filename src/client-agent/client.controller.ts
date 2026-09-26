@@ -11,6 +11,7 @@ export class ClientController {
   @Put('configuration') configure(@Body() body: unknown) { return this.client.configure(body); }
   @Post('candidates') ingest(@Body() body: unknown) { return this.client.ingest(body); }
   @Post('run') run() { return this.client.trigger(); }
+  @Post('discovery-preview') preview() { return this.client.previewDiscovery(); }
   @Get('batches') batches() { return this.db.clientBatch.findMany({ take: 30, orderBy: { createdAt: 'desc' } }); }
   @Get('batches/:id') batch(@Param('id') id: string) { return this.db.clientBatch.findUniqueOrThrow({ where: { id } }); }
   @Get('leads') leads() { return this.db.businessLead.findMany({ take: 100, orderBy: { discoveredAt: 'desc' }, include: { drafts: true, sources: true } }); }
