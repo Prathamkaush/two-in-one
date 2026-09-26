@@ -5,6 +5,16 @@ OpenAI settings and model prices. Never paste keys into chat or commit `.env`.
 
 ## Deploy
 
+Telegram `/client_today` and `/research_today` show readable summaries; raw diagnostic
+JSON remains in the protected API. Previously saved reports also use the new format.
+Website verification accepts a grounded link on the exact business profile without
+requiring the link quote to repeat its name and city. Literal bare bio domains are
+recognized. Unresolved external profile links block candidate delivery rather than
+being treated as absent websites. Unavailable social content remains a coverage limit.
+This formatting/link-verification update adds no migration beyond the client-review migration.
+Existing saved candidates are not reclassified automatically. Mark a reviewed mismatch
+with `PATCH /admin/client/leads/:id`, status `REJECTED` and an explanatory note.
+
 ```bash
 cd /var/www/two-in-one
 git pull --ff-only

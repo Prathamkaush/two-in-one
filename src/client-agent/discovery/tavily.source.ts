@@ -103,6 +103,13 @@ function dedicatedWebsite(url: string) {
       'justdial.com', 'zomato.com', 'swiggy.com', 'linktr.ee'].some((domain) => host === domain || host.endsWith(`.${domain}`));
   } catch { return false; }
 }
+// Read literal URLs, including bare bio domains. Never derive a domain from a name.
+export function websiteLinks(text: string) {
+  const tokens = text.match(/(?:https?:\/\/|www\.)[^\s<>"')\]]+|\b[a-z0-9][a-z0-9-]*\.(?:com|in|co|net|org|shop|store)(?:\.[a-z]{2})?(?:\/[^\s<>"')\]]*)?/gi) ?? [];
+  return [...new Set(tokens.filter((token) => !text.includes(`@${token}`)).map((token) => {
+    try { return publicUrl(/^https?:\/\//i.test(token) ? token.replace(/[.,;]+$/, '') : `https://${token.replace(/[.,;]+$/, '')}`).toString(); } catch { return ''; }
+  }).filter((url) => url && dedicatedWebsite(url)))];
+}
 @Injectable()
 export class TavilyBusinessSource implements BusinessDiscoverySource {
   readonly name = 'tavily';
@@ -180,14 +187,21 @@ export class TavilyBusinessSource implements BusinessDiscoverySource {
           }
           let detected: z.infer<typeof websiteSchema> = { websiteUrl: null, evidence: null, activityDate: null, activity: null, noWebsite: null };
           try {
-            detected = await this.ai.extractStructuredData({ agent: 'CLIENT', job: input.date, requestKey: `website-v2-${createHash('sha256').update(key + profile).digest('hex')}` },
+            detected = await this.ai.extractStructuredData({ agent: 'CLIENT', job: input.date, requestKey: `website-v3-${createHash('sha256').update(key + profile).digest('hex')}` },
               'Identify the dedicated official website of this exact business, matching business name, social handle and location. Return a URL only if observed and a verbatim quote establishes the association. Exclude unrelated names, social profiles and directories. Also copy first-party dated activity and an explicit no-website statement if present. activityDate must be an ISO date supported by the quoted calendar date. Use null for unknown fields. Missing links never establish no website. Do not assume a contact invitation proves current activity.',
               { businessName: business.businessName, location: plan.location, results: combined }, websiteSchema);
           } catch { output.enrichmentFailures++; verificationSucceeded = false; }
+          const profileLinks = combined.filter((r) => sameSource(r.url, profile)).flatMap((r) => websiteLinks(r.content));
+          const firstPartyLink = detected.websiteUrl && detected.evidence && sameSource(detected.evidence.sourceUrl, profile) &&
+            websiteLinks(detected.evidence.text).some((url) => sameSource(url, detected.websiteUrl!));
           const websiteUrl = detected.websiteUrl && detected.evidence && grounded(detected.evidence, combined) &&
-            detected.evidence.text.toLowerCase().includes(business.businessName.toLowerCase()) &&
-            detected.evidence.text.toLowerCase().includes(plan.location.toLowerCase()) &&
-            observedUrl(detected.websiteUrl, combined) && dedicatedWebsite(detected.websiteUrl) ? detected.websiteUrl : null;
+            (firstPartyLink || (detected.evidence.text.toLowerCase().includes(business.businessName.toLowerCase()) &&
+            detected.evidence.text.toLowerCase().includes(plan.location.toLowerCase()))) &&
+            (observedUrl(detected.websiteUrl, combined) || profileLinks.some((url) => sameSource(url, detected.websiteUrl!))) &&
+            dedicatedWebsite(detected.websiteUrl) ? detected.websiteUrl : null;
+          // An unresolved external bio link blocks no-website qualification and review
+          // delivery. It may be an existing shop even when AI/provider verification fails.
+          if (!websiteUrl && profileLinks.length) { reject('external_profile_link_requires_verification'); continue; }
           const noWebsiteQuote = detected.noWebsite && confirmedNoWebsite(detected.noWebsite, profileUrl, combined) ? detected.noWebsite : business.noWebsite;
           const noWebsite = verificationSucceeded && !detected.websiteUrl && !websiteUrl && confirmedNoWebsite(noWebsiteQuote, profileUrl, combined);
           const activity = detected.activity && grounded(detected.activity, combined) ? detected.activity : business.activity;

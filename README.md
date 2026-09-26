@@ -4,7 +4,7 @@ One NestJS application, PostgreSQL/Prisma, Redis/BullMQ, and shared OpenAI/Teleg
 
 ## Current status and server deployment
 
-The MVP supports qualified leads and a separate manual-review list, targeted Tavily verification, and a bounded same-day refresh of an empty client batch. Automated validation passed 119 unit tests, 12 PostgreSQL/Redis integration tests, TypeScript, lint, and build. External API calls were mocked: these results do not guarantee real Tavily coverage or Telegram delivery on the server.
+The MVP supports qualified leads and a separate manual-review list, targeted Tavily verification, and a bounded same-day refresh of an empty client batch. Automated validation passed 124 unit tests, 12 PostgreSQL/Redis integration tests, TypeScript, lint, and build. External API calls were mocked: these results do not guarantee real Tavily coverage or Telegram delivery on the server.
 
 Run deployment commands in the VPS terminal, not in Telegram:
 

@@ -48,6 +48,28 @@ describe('Tavily client discovery', () => {
     const { adapter, db, api } = setup(); db.businessLead.findFirst.mockResolvedValue({ id: 'already-contacted' });
     expect((await adapter.discover(input)).duplicates).toBe(1); expect(api.search).toHaveBeenCalledTimes(1);
   });
+  it('recognizes a website in the exact profile bio without repeating name and city in the quote', async () => {
+    const { adapter, api, ai } = setup();
+    api.search.mockResolvedValue({ results: [{ ...result, content: `${result.content}\nShop online: fixturebakery.in` }] });
+    ai.extractStructuredData.mockReset().mockResolvedValueOnce({ businesses: [business] }).mockResolvedValue({
+      websiteUrl: 'https://fixturebakery.in/', evidence: quote('Shop online: fixturebakery.in'),
+    });
+    const output = await adapter.discover(input);
+    expect(output.businesses[0].candidate.websiteUrl).toBe('https://fixturebakery.in/');
+    expect(output.businesses[0].candidate.factors.noWebsite).toBe(false);
+  });
+  it('withholds a candidate with an unresolved bio website even when AI misses it', async () => {
+    const { adapter, api } = setup();
+    api.search.mockResolvedValue({ results: [{ ...result, content: `${result.content}\nWebsite: https://fixturebakery.in/` }] });
+    const output = await adapter.discover(input);
+    expect(output.businesses).toHaveLength(0);
+    expect(output.rejections.external_profile_link_requires_verification).toBe(1);
+  });
+  it('does not associate another business profile link with this business', async () => {
+    const { adapter, api } = setup();
+    api.search.mockResolvedValue({ results: [result, { url: 'https://instagram.com/other', title: 'Other', content: 'Website: https://other.in/' }] });
+    expect((await adapter.discover(input)).businesses[0].candidate.websiteUrl).toBeNull();
+  });
   it.each([{ location: 'Mumbai' }, { category: 'Software vendors' }, { profileUrl: 'https://instagram.com/invented' },
     { identity: { sourceUrl: profile, text: 'Invented business in Delhi' } }])('rejects mismatched or unsupported candidates %p', async (override) => {
     const { adapter } = setup({ ...business, ...override }); expect((await adapter.discover(input)).businesses).toHaveLength(0);

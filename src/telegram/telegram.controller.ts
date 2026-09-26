@@ -6,6 +6,7 @@ import { Settings } from '../common/config/settings.service';
 import { PrismaService } from '../database/prisma.service';
 import { TelegramService } from './telegram.service';
 import { localClock } from '../scheduler/schedule';
+import { formatDailyReport } from './report-format';
 const updateSchema = z.object({ update_id: z.number().int(), message: z.object({ text: z.string().max(1000), chat: z.object({ id: z.number().int() }) }).optional() });
 @Controller('telegram')
 export class TelegramController {
@@ -32,7 +33,7 @@ export class TelegramController {
     if (['/client', '/client_today', '/research_today'].includes(command)) {
       const agent = command === '/research_today' ? 'RESEARCH' : 'CLIENT';
       const report = await this.db.dailyReport.findUnique({ where: { agent_date: { agent, date } } });
-      response = report ? `${agent}\n${date}\n${JSON.stringify(report.content)}` : `${agent}: no report for ${date}.`;
+      response = report ? formatDailyReport(agent, date, report.content) : `${agent}: no report for ${date}.`;
     } else if (['/research', '/research_status'].includes(command)) {
       const cycle = await this.db.researchCycle.findFirst({ orderBy: { createdAt: 'desc' } });
       response = cycle ? `Research cycle ${cycle.id}\nStatus: ${cycle.status}\nItems: ${cycle.totalItemsCollected}\nProcessed: ${cycle.totalItemsProcessed}\nEnds: ${cycle.endDate.toISOString()}` : 'No research cycle started.';
