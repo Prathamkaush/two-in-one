@@ -1,5 +1,12 @@
 # Dual Automation Platform
 
+Research collection closes at the cycle end date. Expired cycles no longer emit daily
+collection summaries while synthesis is pending. Final findings are delivered as
+Telegram opportunity cards and can be retrieved with `/research_report`. For a failed
+monthly job, inspect `GET /admin/research/cycles/:id/diagnostics` before retrying;
+stored evidence and AI billing records are retained. See the recovery instructions
+in [Tavily deployment](docs/TAVILY_DEPLOYMENT.md).
+
 One NestJS application, PostgreSQL/Prisma, Redis/BullMQ, and shared OpenAI/Telegram/Tavily services. Tavily supplies live client discovery and a separate market-evidence research adapter. External integrations default to disabled. No Instagram login, browser automation, or automatic outreach exists. See [Tavily deployment and manual verification](docs/TAVILY_DEPLOYMENT.md).
 
 ## Current status and server deployment

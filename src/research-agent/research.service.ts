@@ -1,3 +1,4 @@
+import { sendResearchReport } from '../telegram/research-report';
 import { BadRequestException, Injectable, ConflictException } from '@nestjs/common';
 import { z } from 'zod';
 import { PrismaService } from '../database/prisma.service';
@@ -116,6 +117,11 @@ export class ResearchService {
   async dailySummary() {
     const cycle = await this.db.researchCycle.findFirst({ where: { status: { in: ['ACTIVE', 'ANALYZING'] } }, orderBy: { createdAt: 'desc' } });
     if (!cycle) return { status: 'No active cycle' };
+    if (cycle.status !== 'ACTIVE' || new Date() >= cycle.endDate) {
+      await this.telegram.notify(`research-closed-${cycle.id}`,
+        `RESEARCH COLLECTION CLOSED\nCycle: ${cycle.id}\nThe collection period has ended. Final analysis is pending; this is not a completed report.\nUse /research_report for saved findings or /research_status for progress. If analysis failed, inspect the cycle diagnostics before retrying.`, 'RESEARCH');
+      return { status: 'Collection closed; final report pending', cycleId: cycle.id };
+    }
     const date = localClock(new Date(), cycle.timezone).date;
     const items = await this.db.researchItem.findMany({ where: { cycleId: cycle.id, collectedAt: { gte: new Date(Date.now() - 48 * 3600000) } }, select: { collectedAt: true, status: true, source: { select: { name: true } } } });
     const today = items.filter((item) => localClock(item.collectedAt, cycle.timezone).date === date);
@@ -158,7 +164,7 @@ export class ResearchService {
       signals: item.signals.slice(0, 2).map((s) => ({ problem: s.problem.slice(0, 150), quote: s.evidenceQuote.slice(0, 200) })) }));
     while (Buffer.byteLength(JSON.stringify(evidence), 'utf8') > 36000) evidence.pop();
     let result: z.infer<typeof finalReportSchema> = { opportunities: [], insufficiencyReason: 'Insufficient traceable evidence: at least 3 processed items across 2 source domains are required.' };
-    if (items.length >= 3 && new Set(items.map((i) => new URL(i.sourceUrl).hostname)).size >= 2) {
+    if (evidence.length >= 3 && new Set(evidence.map((i) => new URL(i.url).hostname)).size >= 2) {
       result = await this.ai.extractStructuredData({ agent: 'RESEARCH', job: cycleId, requestKey: `monthly-${cycleId}`, strong: true },
         'The collection cycle is closed. Produce up to exactly 10 distinct opportunities only when evidence supports them. Return fewer and explain insufficiency otherwise. Each opportunity needs at least 2 supplied item IDs in sourceReferences. Never invent competitors, demand, willingness-to-pay, or factual gaps: explicitly label unknowns and hypotheses. Confidence and dimension scores must be 0 to 1. Include validation experiments. This is a bounded evidence sample; do not claim exhaustive market research.', evidence, finalReportSchema);
     }
@@ -169,6 +175,9 @@ export class ResearchService {
     const insufficiencyReason = opportunities.length < 10 ? result.insufficiencyReason ?? 'Fewer than 10 opportunities passed evidence-reference validation.' : null;
     const content = { opportunities, insufficiencyReason, evidenceSampleSize: evidence.length, limitations: ['Bounded evidence sample; no automatic deep competitor research in V1.', 'Scores and market interpretations require operator validation.'] };
     const report = await this.db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT pg_advisory_xact_lock(71829342)::text`;
+      const existing = await tx.monthlyReport.findUnique({ where: { cycleId } });
+      if (existing) return existing;
       const report = await tx.monthlyReport.create({ data: { cycleId, content, insufficiencyReason } });
       for (const [index, opportunity] of opportunities.entries()) {
         const signal = await tx.researchSignal.findFirst({ where: { itemId: opportunity.sourceReferences[0], clusterId: { not: null } } });
@@ -186,5 +195,6 @@ export class ResearchService {
   private async notifyCompletion(cycleId: string, reportId: string) {
     const count = await this.db.finalOpportunity.count({ where: { reportId } });
     await this.telegram.notify(`monthly-${cycleId}`, `MONTHLY BUSINESS RESEARCH COMPLETE\nCycle: ${cycleId}\nFinal opportunities: ${count}\nFull report: GET /admin/research/reports/${reportId} (requires operator authentication).\nIf evidence was insufficient, the report explains the shortfall.`, "RESEARCH");
+    await sendResearchReport(this.db, this.telegram, cycleId, `monthly-findings-${cycleId}`);
   }
 }

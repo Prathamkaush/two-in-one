@@ -18,11 +18,18 @@ export class AgentsScheduler {
     }
     if (this.settings.get('RESEARCH_AGENT_ENABLED')) {
       try {
-        if (due.researchBatch) await this.research.collectNow();
-        if (due.researchSummary) await this.research.dailySummary();
         const ended = await this.db.researchCycle.findMany({ where: { status: { in: ['ACTIVE', 'ANALYZING'] }, endDate: { lte: new Date() } } });
-        for (const cycle of ended) await this.research.finalize(cycle.id);
+        for (const cycle of ended) {
+          try { await this.research.finalize(cycle.id); }
+          catch { this.logger.warn('Research finalization is blocked; inspect cycle diagnostics'); }
+        }
       } catch { this.logger.warn('Research scheduling is waiting for an active cycle, pending processing, or available infrastructure'); }
+      if (due.researchBatch) {
+        try { await this.research.collectNow(); } catch { this.logger.warn('No open collection window or collection unavailable'); }
+      }
+      if (due.researchSummary) {
+        try { await this.research.dailySummary(); } catch { this.logger.warn('Research summary unavailable'); }
+      }
     }
   }
 }

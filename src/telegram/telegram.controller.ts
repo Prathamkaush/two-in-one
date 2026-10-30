@@ -7,6 +7,7 @@ import { PrismaService } from '../database/prisma.service';
 import { TelegramService } from './telegram.service';
 import { localClock } from '../scheduler/schedule';
 import { formatDailyReport } from './report-format';
+import { sendResearchReport } from './research-report';
 const updateSchema = z.object({ update_id: z.number().int(), message: z.object({ text: z.string().max(1000), chat: z.object({ id: z.number().int() }) }).optional() });
 @Controller('telegram')
 export class TelegramController {
@@ -30,7 +31,11 @@ export class TelegramController {
     const command = message.text.split(/\s|@/)[0];
     const date = localClock(new Date(), this.settings.get('TIMEZONE')).date;
     let response: string;
-    if (command === '/client_reviews') {
+    if (command === '/research_report') {
+      const cycle = await this.db.researchCycle.findFirst({ orderBy: { createdAt: 'desc' } });
+      if (cycle && await sendResearchReport(this.db, this.telegram, cycle.id, `command-${bot}-${update_id}-report`, bot)) return { ok: true };
+      response = cycle ? `No final report saved for cycle ${cycle.id}.\nStatus: ${cycle.status}\n${new Date() >= cycle.endDate ? 'Collection has ended. Final analysis is pending or failed; inspect cycle diagnostics.' : 'Collection is still in progress.'}\nStored items: ${cycle.totalItemsCollected}; processed: ${cycle.totalItemsProcessed}` : 'No research cycle started.';
+    } else if (command === '/client_reviews') {
       const pageText = message.text.trim().split(/\s+/)[1] ?? '1';
       if (!/^[1-9]\d{0,3}$/.test(pageText)) {
         response = 'Use /client_reviews or /client_reviews 2 for the next page.';
@@ -64,13 +69,13 @@ export class TelegramController {
       response = report ? formatDailyReport(agent, date, report.content) : `${agent}: no report for ${date}.`;
     } else if (['/research', '/research_status'].includes(command)) {
       const cycle = await this.db.researchCycle.findFirst({ orderBy: { createdAt: 'desc' } });
-      response = cycle ? `Research cycle ${cycle.id}\nStatus: ${cycle.status}\nItems: ${cycle.totalItemsCollected}\nProcessed: ${cycle.totalItemsProcessed}\nEnds: ${cycle.endDate.toISOString()}` : 'No research cycle started.';
+      response = cycle ? `Research cycle ${cycle.id}\nStatus: ${cycle.status}\nItems: ${cycle.totalItemsCollected}\nProcessed: ${cycle.totalItemsProcessed}\nEnds: ${cycle.endDate.toISOString()}\n${cycle.status === 'COMPLETED' ? 'Final findings: /research_report' : new Date() >= cycle.endDate ? 'Collection closed. Final analysis pending or failed; inspect cycle diagnostics. /research_report checks for saved findings.' : 'Collection in progress.'}` : 'No research cycle started.';
     } else if (command === '/cost') {
       const since = new Date(); since.setUTCHours(0, 0, 0, 0);
       const total = await this.db.aIUsage.aggregate({ where: { createdAt: { gte: since } }, _sum: { estimatedCost: true } });
       response = `AI cost/reservations today (UTC): $${Number(total._sum.estimatedCost ?? 0).toFixed(4)}`;
     } else if (['/status', '/health'].includes(command)) response = `Platform is responding.\nClient schedule: ${this.settings.get('CLIENT_AGENT_ENABLED')}\nResearch schedule: ${this.settings.get('RESEARCH_AGENT_ENABLED')}\nDetailed infrastructure readiness: GET /health/ready`;
-    else response = 'Commands: /status /client_today /client_reviews /research_today /research_status /cost /health';
+    else response = 'Commands: /status /client_today /client_reviews /research_today /research_status /research_report /cost /health';
     await this.telegram.notify(`command-${bot}-${update_id}`, response, bot);
     return { ok: true };
   }

@@ -5,6 +5,37 @@ OpenAI settings and model prices. Never paste keys into chat or commit `.env`.
 
 ## Deploy
 
+### Recover an ended research cycle
+
+Collection stops at `endDate`. Expired/ANALYZING cycles no longer send daily collection
+summaries; one deduplicated notice explains that analysis is pending. Scheduler
+finalization checks run independently from collection errors. Completed synthesis
+sends opportunity cards and source links; `/research_report` retrieves the latest
+cycle's saved report without another AI request. No new cycle starts automatically.
+
+If monthly analysis exhausted retries, do not delete the cycle, its evidence or AI ledger.
+After deployment, inspect:
+
+```bash
+api admin/research/cycles
+api admin/research/cycles/CYCLE_ID/diagnostics
+```
+
+Diagnostics returns the durable monthly job ID, queue state, pending item count,
+recent execution errors and AI request accounting. If pending extraction is the
+blocker, resolve those items first. If a report exists, use `/research_report`.
+If the job failed, fix the reported cause before using the existing protected retry:
+
+```bash
+api admin/queues/monthly-analysis/jobs/JOB_ID/retry -X POST
+```
+
+An `UNCERTAIN`/reserved AI request, or a settled request without usable output, will
+not be billed again automatically. Retrying the queue does not bypass this safeguard;
+inspect and reconcile the provider usage before authorizing a new paid request.
+These lifecycle/delivery fixes do not establish the cause of a particular server's
+AI failure. They require no additional database migration.
+
 Telegram `/client_today` and `/research_today` show readable summaries; raw diagnostic
 JSON remains in the protected API. Previously saved reports also use the new format.
 Website verification accepts a grounded link on the exact business profile without
